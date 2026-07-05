@@ -1,0 +1,40 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: newapi-keyload-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=keyload
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-keyload_pw}
+      - POSTGRES_DB=keyload
+      - TZ=Asia/Shanghai
+    volumes:
+      - keyload-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keyload -d keyload"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  keyload:
+    build: .
+    image: newapi-keyload:latest
+    container_name: newapi-keyload
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # 宿主 3010 → 容器 3000
+      - "3010:3000"
+    env_file:
+      # naci token / 管理员密钥 / 库密码等敏感值，仅本地 .env（不入库）
+      - .env
+    environment:
+      - NODE_ENV=production
+      - TZ=Asia/Shanghai
+      # 连接同一 compose 网络内的 db 服务
+      - DATABASE_URL=postgres://keyload:${POSTGRES_PASSWORD:-keyload_pw}@db:5432/keyload
+
+volumes:
+  keyload-pgdata:

@@ -1,0 +1,42 @@
+# ---- 依赖 ----
+/node_modules
+/.pnp
+.pnp.js
+.yarn/install-state.gz
+
+# ---- Next.js 构建产物 ----
+/.next/
+/out/
+/build
+next-env.d.ts.timestamp
+
+# ---- 运行时 / 调试 ----
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- 本地环境变量 ----
+.env
+.env*.local
+.env.development
+.env.production
+
+# ---- 本地持久化数据（运行时生成，不入库）----
+/data/*.json
+
+# ---- 原始接口抓包（含真实密钥，勿入库）----
+/docs/*-channel-*.txt
+
+# ---- 工具 / 缓存 ----
+.playwright-mcp/
+.turbo/
+*.tsbuildinfo
+
+# ---- 系统 / 编辑器 ----
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/
