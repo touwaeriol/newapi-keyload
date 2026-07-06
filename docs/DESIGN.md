@@ -70,7 +70,7 @@
 
 ## 9. 部署
 
-Docker Compose：`app`（Next.js standalone）+ `db`（postgres:16-alpine，数据卷 `keyload-pgdata`）。敏感值：`ADMIN_ACCESS_KEY`、`POSTGRES_PASSWORD` 走 `.env`（gitignore 且不入镜像）；**naci 账号密码存数据库**。OVH 上 Caddy 反代 HTTPS。
+Docker Compose：`app`（Next.js standalone）+ `db`（postgres:16-alpine，数据卷 `keyload-pgdata`）。**不依赖 `.env` 文件**：`DATABASE_URL`、库密码等直接写在 `docker-compose.yml`（db 仅内部网络、不暴露宿主端口）。管理员密钥首次随机生成并打印到日志；**naci 账号密码存数据库**。OVH 上 Caddy 反代 HTTPS。
 
 ## 10. 安全约束
 

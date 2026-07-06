@@ -7,14 +7,15 @@
 ## 快速开始
 
 ```bash
-cp .env.example .env    # 填 ADMIN_ACCESS_KEY 与 POSTGRES_PASSWORD
-docker compose up -d --build      # app + postgres
+docker compose up -d --build      # app + postgres，无需 .env
 # 访问 http://localhost:3010
 ```
 
-首次启动自动建表并 seed 一个管理员（accessKey 取 `ADMIN_ACCESS_KEY`，留空则随机生成并打印到容器日志 `[seed] 生成默认管理员密钥: …`）。
+**不依赖任何 `.env` 文件**：所有运行配置直接写在 `docker-compose.yml`（DATABASE_URL、库密码仅用于内部网络、不暴露宿主）。
 
-**naci 账号密码不在 `.env`**：登录后进「配置」页填 naci 用户名+密码，保存到数据库（`config` 表）。之后后端用它登录 naci 维护 session。
+首次启动自动建表并 seed 一个管理员，**密钥随机生成并打印到容器日志**（`docker compose logs keyload | grep seed` → `[seed] 生成默认管理员密钥: …`），用它登录。
+
+**naci 账号密码**：登录后进「配置」页填 naci 用户名+密码，保存到数据库（`config` 表）。之后后端用它登录 naci 维护 session。所有敏感值（管理员密钥、naci 账号密码）均在**数据库**里管理，代码与仓库不留明文。
 
 ## 两套鉴权
 
