@@ -58,6 +58,19 @@ function fmtAmount(v?: number) {
   return v.toFixed(4);
 }
 
+/** 可用 key 数 = 平台 key 数 − 禁用 key 数；任一缺失返回 null（显示「-」） */
+function aliveKeyCount(channel: ChannelStatus): number | null {
+  if (channel.platformKeyCount == null || channel.deadKeyCount == null) {
+    return null;
+  }
+  return channel.platformKeyCount - channel.deadKeyCount;
+}
+
+/** 「自动禁用」态：渠道有 key 但可用为 0（全死），即使 status 显示启用也需补 key */
+function isExhausted(channel: ChannelStatus): boolean {
+  return (channel.platformKeyCount ?? 0) > 0 && aliveKeyCount(channel) === 0;
+}
+
 /**
  * 共享渠道状态视图：是否存在、状态徽章、概览（含已上传 key 数）、
  * 顶层用量、模型 badges、各站点发布与用量。供用户面板与管理员弹窗复用。
@@ -108,6 +121,20 @@ export function ChannelStatusView({ channel }: { channel: ChannelStatus | null }
                 }
               >
                 {channel.deadKeyCount}
+              </span>
+            )
+          }
+        />
+        <Stat
+          label="可用 Key 数"
+          value={
+            aliveKeyCount(channel) == null ? (
+              "-"
+            ) : (
+              <span
+                className={isExhausted(channel) ? "text-rose-600" : undefined}
+              >
+                {aliveKeyCount(channel)}
               </span>
             )
           }
@@ -209,16 +236,21 @@ function UploadProgress({ channel }: { channel: ChannelStatus }) {
   const batch = channel.uploadBatchSize ?? 0;
   const remainingBatches = batch > 0 ? Math.ceil(pending / batch) : 0;
   const auto = channel.autoRefillEnabled;
+  const alive = aliveKeyCount(channel);
+  const exhausted = isExhausted(channel);
 
   return (
     <div className="rounded-xl border border-brand-100 bg-brand-50/50 p-4">
-      <div className="mb-3 flex items-center justify-between">
+      <div className="mb-3 flex items-center justify-between gap-2">
         <h4 className="text-sm font-semibold text-slate-800">上传进度</h4>
-        {auto === false ? (
-          <Badge tone="rose">自动补 key 已关闭</Badge>
-        ) : (
-          <Badge tone="green">自动补 key 运行中</Badge>
-        )}
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {exhausted && <Badge tone="rose">自动禁用 · 无可用 Key</Badge>}
+          {auto === false ? (
+            <Badge tone="rose">自动补 key 已关闭</Badge>
+          ) : (
+            <Badge tone="green">自动补 key 运行中</Badge>
+          )}
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -230,8 +262,22 @@ function UploadProgress({ channel }: { channel: ChannelStatus }) {
         />
         <BigStat label="每批数量" value={batch || "-"} />
         <BigStat
-          label="平台 Key 数"
-          value={channel.platformKeyCount ?? "-"}
+          label="可用 / 平台 Key"
+          value={
+            channel.platformKeyCount == null ? (
+              "-"
+            ) : (
+              <>
+                <span className={exhausted ? "text-rose-600" : undefined}>
+                  {alive == null ? "-" : alive}
+                </span>
+                <span className="text-slate-400">
+                  {" / "}
+                  {channel.platformKeyCount}
+                </span>
+              </>
+            )
+          }
         />
       </div>
 

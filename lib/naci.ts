@@ -10,8 +10,9 @@
 //   GET  /api/admin-hub/channels/{id}                详情（data 为渠道对象）
 //   POST /api/admin-hub/channels/                    创建
 //   PUT  /api/admin-hub/channels/{id}                更新（key_mode=append 追加 key）
-//   POST /api/admin-hub/channels/{id}/status         批量站点状态（重开 / 读 key 统计）
-import { getConfig } from "./store";
+//   POST /api/admin-hub/channels/{id}/status         一次性重开全部三站（{all_sites:true,status:1}）
+//   POST /api/admin-hub/channels/status-batch        只读每站 status + key 统计（{ids:[id]}）
+import { addLog, getConfig } from "./store";
 import {
   CHANNEL_JSON_TEMPLATE,
   LAST_SELECTED_SITE_IDS_JSON,
@@ -19,6 +20,10 @@ import {
   SITE_GROUP_OVERRIDES,
 } from "./supplier";
 import type { KeyStats, NaciChannel } from "./types";
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 interface NaciEnvelope<T> {
   success: boolean;
@@ -329,10 +334,13 @@ export async function updateChannel(params: {
 
 // —— 站点状态 / key 统计 ——
 
+// multi_key_status_list 可能是数组（下标即 key 序）或对象（"下标"→状态），两者都要能解析。
+type StatusList = number[] | Record<string, number>;
+
 /** 从任意可能的响应结构里抽取 channel_info（含 multi_key_size / multi_key_status_list）。 */
 function pickChannelInfo(
   data: unknown
-): { multi_key_size?: number; multi_key_status_list?: number[] } | null {
+): { multi_key_size?: number; multi_key_status_list?: StatusList } | null {
   if (!data || typeof data !== "object") return null;
   const d = data as Record<string, unknown>;
   const candidates: unknown[] = [
@@ -346,7 +354,7 @@ function pickChannelInfo(
       if ("multi_key_size" in info || "multi_key_status_list" in info) {
         return info as {
           multi_key_size?: number;
-          multi_key_status_list?: number[];
+          multi_key_status_list?: StatusList;
         };
       }
     }
@@ -354,13 +362,20 @@ function pickChannelInfo(
   return null;
 }
 
+/** 把 multi_key_status_list（数组或「下标→状态」对象）归一为状态数组。 */
+function normalizeStatusList(raw: StatusList | undefined): number[] {
+  if (Array.isArray(raw)) return raw.map((v) => Number(v));
+  if (raw && typeof raw === "object") {
+    return Object.values(raw).map((v) => Number(v));
+  }
+  return [];
+}
+
 function toKeyStats(info: {
   multi_key_size?: number;
-  multi_key_status_list?: number[];
+  multi_key_status_list?: StatusList;
 } | null): KeyStats {
-  const statusList = Array.isArray(info?.multi_key_status_list)
-    ? (info!.multi_key_status_list as number[])
-    : [];
+  const statusList = normalizeStatusList(info?.multi_key_status_list);
   const platformKeyCount =
     typeof info?.multi_key_size === "number"
       ? info!.multi_key_size!
@@ -369,17 +384,111 @@ function toKeyStats(info: {
   return { platformKeyCount, deadKeyCount, statusList };
 }
 
+// status-batch 单渠道条目的解析结果：每站 status + 聚合 key 统计。
+interface ParsedStatusBatch {
+  /** site_id → 站点级 status（1=已打开，3=未打开/自动禁用）。 */
+  siteStatus: Map<number, number>;
+  /** 平台真实 key 数（第一个 channel_info.multi_key_size，缺则退回 list 长度最大值）。 */
+  multiKeySize: number;
+  /** 各站点存活数（status!==3）的最大值。 */
+  aliveCount: number;
+  /** multiKeySize - aliveCount（下限 0）。 */
+  deadCount: number;
+  /** 是否至少读到一份 multi_key_status_list（用于判断 key 统计是否可信）。 */
+  hasKeyInfo: boolean;
+}
+
 /**
- * 重开渠道在所有站点的状态（status=1），并返回 key 统计。
- * 实测响应含 channel.channel_info.multi_key_size 与 multi_key_status_list。
+ * 解析 status-batch 响应里某渠道的条目（纯函数，不发请求）。
+ * 结构：data[id].sites[*] = { site_id, status, channel_info:{multi_key_size, multi_key_status_list} }。
+ * - siteStatus：逐站的 site 级 status（1=已打开，非 1=未打开）。
+ * - key 统计：每站存活 = list 里 status!==3 的个数，aliveCount 取各站最大值；
+ *   multiKeySize = 第一个 multi_key_size（缺则退回 list 最大长度）；deadCount = size-alive（≥0）。
+ * data 无该渠道 / 无 sites 时返回 null。
  */
-export async function reenableAllSites(id: number): Promise<KeyStats> {
-  const env = await naciFetch<unknown>(
-    "POST",
-    `/api/admin-hub/channels/${id}/status`,
-    { all_sites: true, status: 1 }
-  );
-  return toKeyStats(pickChannelInfo(env.data));
+function parseStatusBatch(data: unknown, id: number): ParsedStatusBatch | null {
+  if (!data || typeof data !== "object") return null;
+  const map = data as Record<string, unknown>;
+  // 按渠道 id 取；取不到则退回第一个条目（防御性）
+  const entry = map[String(id)] ?? Object.values(map)[0];
+  if (!entry || typeof entry !== "object") return null;
+
+  const sites = (entry as { sites?: unknown }).sites;
+  if (!Array.isArray(sites) || sites.length === 0) return null;
+
+  const siteStatus = new Map<number, number>();
+  let multiKeySize: number | null = null;
+  let maxListLen = 0;
+  let aliveCount = 0;
+  let sawList = false;
+
+  for (const site of sites) {
+    if (!site || typeof site !== "object") continue;
+    const s = site as Record<string, unknown>;
+
+    if (typeof s.site_id === "number" && typeof s.status === "number") {
+      siteStatus.set(s.site_id, s.status);
+    }
+
+    const info = s.channel_info as Record<string, unknown> | undefined;
+    if (info && typeof info === "object") {
+      if (multiKeySize === null && typeof info.multi_key_size === "number") {
+        multiKeySize = info.multi_key_size;
+      }
+      const list = info.multi_key_status_list;
+      if (list && typeof list === "object") {
+        sawList = true;
+        const statuses = Object.values(list as Record<string, unknown>);
+        maxListLen = Math.max(maxListLen, statuses.length);
+        const alive = statuses.filter((x) => Number(x) !== 3).length;
+        if (alive > aliveCount) aliveCount = alive;
+      }
+    }
+  }
+
+  const size = multiKeySize ?? maxListLen;
+  const deadCount = Math.max(0, size - aliveCount);
+  return { siteStatus, multiKeySize: size, aliveCount, deadCount, hasKeyInfo: sawList };
+}
+
+/**
+ * 补 key 后一次性打开渠道全部三站的调度：单次
+ * POST /api/admin-hub/channels/{id}/status body `{all_sites:true, status:1}`。
+ *
+ * **整个调用带重试**：最多 3 次、间隔 ~800ms、任一次成功即停。3 次都失败记 error 日志
+ * 「补 key 后未能打开站点调度，已重试 3 次仍失败：<原因>」但**不抛**（保证 tick 不 crash）。
+ *
+ * key 统计从该响应的 channel_info（pickChannelInfo 覆盖 data.channel_info /
+ * data.channel.channel_info / 顶层）解析 multi_key_size / multi_key_status_list（3=禁用）；
+ * 解析不到返回 null（pushBatchToChannel 已有 null 兜底）。
+ */
+export async function reenableAllSites(id: number): Promise<KeyStats | null> {
+  let lastErr: unknown = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const env = await naciFetch<unknown>(
+        "POST",
+        `/api/admin-hub/channels/${id}/status`,
+        { all_sites: true, status: 1 }
+      );
+      const info = pickChannelInfo(env.data);
+      return info ? toKeyStats(info) : null;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < 3) await sleep(800);
+    }
+  }
+
+  // 3 次都失败：记 error，不抛（引擎不 crash，key 保持 pending 下轮重试）
+  await addLog({
+    level: "error",
+    actor: "engine",
+    channelId: id,
+    message: `补 key 后未能打开站点调度，已重试 3 次仍失败：${
+      lastErr instanceof Error ? lastErr.message : String(lastErr)
+    }`,
+  });
+  return null;
 }
 
 /**
@@ -392,6 +501,37 @@ export async function getKeyStats(id: number): Promise<KeyStats | null> {
     pickChannelInfo(detail.channelJsonObj) ?? pickChannelInfo(detail);
   if (!info) return null;
   return toKeyStats(info);
+}
+
+/**
+ * 只读检测渠道 key 存活情况（不写平台）：POST /api/admin-hub/channels/status-batch {ids:[id]}。
+ * 响应结构：data[id].sites[*].channel_info.{multi_key_size, multi_key_status_list}，
+ * 其中 multi_key_status_list 为「key 下标 → 状态」对象（3 = 禁用/死，非 3 = 存活）；
+ * 多站点各有一份 list（key 共享）。
+ *
+ * 计算：每站点存活数 = 该站点 list 里 status!==3 的个数；aliveCount = 各站点存活数的最大值；
+ * multiKeySize = 取到的第一个 channel_info.multi_key_size（缺则退回 list 长度最大值）；
+ * deadCount = multiKeySize - aliveCount（下限 0）。
+ * 拿不到（data 空 / 无 sites / 无 status list）返回 null，由调用方决定跳过。
+ */
+export async function getChannelKeyStatus(id: number): Promise<{
+  multiKeySize: number;
+  aliveCount: number;
+  deadCount: number;
+} | null> {
+  const env = await naciFetch<Record<string, unknown>>(
+    "POST",
+    "/api/admin-hub/channels/status-batch",
+    { ids: [id] }
+  );
+  const parsed = parseStatusBatch(env.data, id);
+  // 未读到任何 multi_key_status_list（无从判断存活）→ null，调用方按「本轮跳过」处理
+  if (!parsed || !parsed.hasKeyInfo) return null;
+  return {
+    multiKeySize: parsed.multiKeySize,
+    aliveCount: parsed.aliveCount,
+    deadCount: parsed.deadCount,
+  };
 }
 
 /** 连通性测试：登录并校验 session（GET /api/user/self）。 */

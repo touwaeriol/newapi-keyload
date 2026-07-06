@@ -1,17 +1,27 @@
 import { NextRequest } from "next/server";
 import { errorResponse, fail, ok, requireAdmin } from "@/lib/auth";
-import { genAccessKey, genId, getUsers, upsertUser } from "@/lib/store";
+import {
+  genAccessKey,
+  genId,
+  getUsers,
+  poolCountsAll,
+  upsertUser,
+} from "@/lib/store";
 import type { Role, User } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// GET /api/admin/users —— 用户列表（含 accessKey，供管理员分发）。
+// GET /api/admin/users —— 用户列表（含 accessKey 供分发，附本地池 pending/uploaded 概览）。
 export async function GET(req: NextRequest) {
   try {
     await requireAdmin(req);
-    const users = await getUsers();
-    return ok({ users });
+    const [users, poolMap] = await Promise.all([getUsers(), poolCountsAll()]);
+    const withPool = users.map((u) => {
+      const p = poolMap[u.channelName] ?? { pending: 0, uploaded: 0 };
+      return { ...u, poolPending: p.pending, poolUploaded: p.uploaded };
+    });
+    return ok({ users: withPool });
   } catch (err) {
     return errorResponse(err);
   }

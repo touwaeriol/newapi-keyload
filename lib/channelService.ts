@@ -2,11 +2,13 @@
 //
 // Phase 2 模型：上传入口只把 key 落本地池（enqueueKeys），由定时引擎
 // （lib/engine.ts）每分钟取一批调 pushBatchToChannel 上传到 naci；每批上传后
-// 启用全部三站（reenableAllSites, all_sites:true）保调度，直到池排空。
+// 一次性打开全部三站（reenableAllSites，单次 {all_sites:true,status:1} + 外层重试）保调度，
+// 直到池排空。
 import {
   createChannel,
   findChannelByName,
   getChannel,
+  getChannelKeyStatus,
   reenableAllSites,
   updateChannel,
 } from "./naci";
@@ -129,17 +131,19 @@ export async function pushBatchToChannel(
     action = "created";
   }
 
-  // 每批上传后启用全部三站（all_sites:true,status:1）保调度，并取真实 key 统计
+  // 每批上传后一次性打开全部三站调度并取真实 key 统计。
+  // reenableAllSites 单次 {all_sites:true,status:1} 调用带外层 3 次重试、失败记 error 且不抛，
+  // 故此处直接调用；保留 try/catch 仅作防御（理论上不抛），确保引擎不 crash。
   let keyStats: KeyStats | null = null;
   try {
     keyStats = await reenableAllSites(channelId);
   } catch (err) {
     await addLog({
-      level: "warn",
+      level: "error",
       actor: user?.username ?? "engine",
       channelName: name,
       channelId,
-      message: `重开站点失败：${err instanceof Error ? err.message : String(err)}`,
+      message: `打开站点调度异常：${err instanceof Error ? err.message : String(err)}`,
     });
   }
 
@@ -179,6 +183,81 @@ export async function pushBatchToChannel(
     platformKeyCount: keyStats?.platformKeyCount,
     deadKeyCount: keyStats?.deadKeyCount,
   };
+}
+
+/** 补给判定结果（供定时引擎「按需补给」用）。 */
+export interface RefillDecision {
+  /** 是否需要本轮补一批 key。 */
+  needsKeys: boolean;
+  /**
+   * missing   —— 渠道尚不存在，需创建首批；
+   * exhausted —— 渠道存在、启用，但存活 key=0（自动禁用态），需补一批；
+   * alive     —— 渠道存在且仍有存活 key，key 留在池里；
+   * manual    —— 渠道被手动禁用（channel.status===2），不补，key 留在池里；
+   * unreadable—— 只读检测失败（naci 读异常/空），本轮跳过下轮重试。
+   */
+  status: "missing" | "exhausted" | "alive" | "manual" | "unreadable";
+  /** 已解析的渠道 id（渠道存在时），否则 null。 */
+  channelId: number | null;
+}
+
+/**
+ * 判定某渠道是否需要补给（只读，不写 naci key）：
+ * 1. 解析渠道（复用绑定用户的 channelId 缓存）；不存在 → missing（needsKeys）。
+ * 2. 渠道被手动禁用（channel.status===2）→ manual（不补；人工干预不覆盖）。
+ * 3. 否则 getChannelKeyStatus 只读检测：
+ *    - 读失败（null）→ unreadable（本轮跳过）。
+ *    - aliveCount===0 → exhausted（needsKeys，即「启用但 0 可用」的自动禁用态）。
+ *    - 否则 alive（无需补）。
+ * 4. 渠道存在时，顺带用读到的**真实** multiKeySize/deadCount 刷新用户表缓存
+ *    （platformKeyCount=multiKeySize、deadKeyCount=deadCount，无需 reenable），
+ *    保证「不补的那些轮」前端也能看到真实「可用=platform-dead」（如 0/280）；并回写 channelId。
+ */
+export async function assessRefillNeed(
+  channelName: string
+): Promise<RefillDecision> {
+  const name = channelName.trim();
+  if (!name) return { needsKeys: false, status: "unreadable", channelId: null };
+
+  const user = await findUserByChannelName(name);
+  const existing = await resolveChannelByName(name, user?.channelId);
+
+  if (!existing) {
+    return { needsKeys: true, status: "missing", channelId: null };
+  }
+
+  // 回写 channelId 缓存（渠道已解析到 id）
+  if (user && user.channelId !== existing.id) {
+    await upsertUser({
+      ...user,
+      channelId: existing.id,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  // 手动禁用（status===2）：人工干预，不自动补 key。
+  // 注：keys 全 status=3 时渠道 status 仍为 1（启用），那是「自动禁用」态，需补。
+  if (typeof existing.status === "number" && existing.status === 2) {
+    return { needsKeys: false, status: "manual", channelId: existing.id };
+  }
+
+  const stat = await getChannelKeyStatus(existing.id);
+  if (!stat) {
+    return { needsKeys: false, status: "unreadable", channelId: existing.id };
+  }
+
+  // 用只读检测读到的真实统计刷新缓存（补与不补的轮次都刷新，让前端始终显示真实可用数）
+  if (user) {
+    await updateUserKeyStats(user.id, {
+      platformKeyCount: stat.multiKeySize,
+      deadKeyCount: stat.deadCount,
+    });
+  }
+
+  if (stat.aliveCount === 0) {
+    return { needsKeys: true, status: "exhausted", channelId: existing.id };
+  }
+  return { needsKeys: false, status: "alive", channelId: existing.id };
 }
 
 /** 供 GET /api/my/channel 用：解析并返回渠道详情 + 本地池进度，不写 key。 */

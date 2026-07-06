@@ -253,10 +253,50 @@ function ConfigCard() {
 
 /* ============ 用户管理卡 ============ */
 
+/** 列表行扩展：后端在 user 上附带的渠道动态字段（SafeUser 未必声明，按可选读取） */
+interface AdminUserRow extends SafeUser {
+  platformKeyCount?: number | null;
+  deadKeyCount?: number | null;
+  poolPending?: number;
+  poolUploaded?: number;
+}
+
+/** 用户列表轮询间隔（毫秒） */
+const USERS_POLL_INTERVAL = 15000;
+
+/**
+ * 「可用/总数」单元格：可用 = 平台 Key − 禁用 Key。
+ * 平台 Key 缺失显示「-」；可用为 0 且总数>0 时整体红色并附「自动禁用」小字，
+ * 让 status 仍显示「启用」但 key 全死的渠道一眼可辨。
+ */
+function KeyUsageCell({ row }: { row: AdminUserRow }) {
+  if (row.platformKeyCount == null) {
+    return <span className="text-slate-400">-</span>;
+  }
+  const total = row.platformKeyCount;
+  const alive = total - (row.deadKeyCount ?? 0);
+  const exhausted = alive === 0 && total > 0;
+  return (
+    <span className={exhausted ? "text-rose-600" : "text-slate-600"}>
+      <span className="font-medium">{alive}</span>
+      <span className={exhausted ? "text-rose-400" : "text-slate-400"}>
+        {" / "}
+        {total}
+      </span>
+      {exhausted && (
+        <span className="ml-1 align-middle text-[10px] font-medium text-rose-500">
+          自动禁用
+        </span>
+      )}
+    </span>
+  );
+}
+
 function UsersCard() {
   const toast = useToast();
-  const [users, setUsers] = useState<SafeUser[]>([]);
+  const [users, setUsers] = useState<AdminUserRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
 
   const [editorOpen, setEditorOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<SafeUser | null>(null);
@@ -278,22 +318,37 @@ function UsersCard() {
     };
   }, []);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const data = await apiFetch("/api/admin/users");
-      if (!mounted.current) return;
-      setUsers(toArray<SafeUser>(data, "users"));
-    } catch (err) {
-      if (!mounted.current) return;
-      toast.error(err instanceof Error ? err.message : "读取用户失败");
-    } finally {
-      if (mounted.current) setLoading(false);
-    }
-  }, [toast]);
+  // silent=true 用于后台轮询：不切整卡 loading，也不弹错误 toast
+  const load = useCallback(
+    async (silent = false) => {
+      if (!silent) setLoading(true);
+      try {
+        const data = await apiFetch("/api/admin/users");
+        if (!mounted.current) return;
+        setUsers(toArray<AdminUserRow>(data, "users"));
+        setLastRefreshedAt(new Date());
+      } catch (err) {
+        if (!mounted.current) return;
+        if (!silent) {
+          toast.error(err instanceof Error ? err.message : "读取用户失败");
+        }
+      } finally {
+        if (mounted.current && !silent) setLoading(false);
+      }
+    },
+    [toast]
+  );
 
   useEffect(() => {
-    load();
+    load(false);
+  }, [load]);
+
+  // 每 ~15s 静默轮询刷新列表（渠道动态/队列进度），卸载清 interval
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      load(true);
+    }, USERS_POLL_INTERVAL);
+    return () => window.clearInterval(timer);
   }, [load]);
 
   function openCreate() {
@@ -340,7 +395,17 @@ function UsersCard() {
     <Card
       title="用户管理"
       subtitle="每个用户对应一个访问密钥与一个绑定渠道"
-      actions={<Button onClick={openCreate}>新建用户</Button>}
+      actions={
+        <>
+          {lastRefreshedAt && (
+            <span className="hidden text-xs text-slate-400 sm:inline">
+              自动刷新中 · 最后 {" "}
+              {lastRefreshedAt.toLocaleTimeString("zh-CN", { hour12: false })}
+            </span>
+          )}
+          <Button onClick={openCreate}>新建用户</Button>
+        </>
+      }
     >
       {loading ? (
         <LoadingRow />
@@ -348,13 +413,17 @@ function UsersCard() {
         <EmptyRow text="暂无用户" />
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[720px] text-sm">
+          <table className="w-full min-w-[1040px] text-sm">
             <thead className="text-left text-xs text-slate-500">
               <tr className="border-b border-slate-100">
                 <th className="py-2 pr-3 font-medium">用户名</th>
                 <th className="py-2 pr-3 font-medium">角色</th>
                 <th className="py-2 pr-3 font-medium">绑定渠道</th>
                 <th className="py-2 pr-3 font-medium">渠道状态</th>
+                <th className="py-2 pr-3 text-right font-medium">可用/平台Key</th>
+                <th className="py-2 pr-3 text-right font-medium">禁用</th>
+                <th className="py-2 pr-3 text-right font-medium">待上传</th>
+                <th className="py-2 pr-3 text-right font-medium">已上传</th>
                 <th className="py-2 pr-3 font-medium">访问密钥</th>
                 <th className="py-2 pr-3 text-right font-medium">操作</th>
               </tr>
@@ -377,6 +446,36 @@ function UsersCard() {
                     ) : (
                       <Badge tone="amber">未创建</Badge>
                     )}
+                  </td>
+                  <td className="py-2.5 pr-3 text-right tabular-nums">
+                    <KeyUsageCell row={u} />
+                  </td>
+                  <td className="py-2.5 pr-3 text-right tabular-nums">
+                    {u.deadKeyCount == null ? (
+                      <span className="text-slate-400">-</span>
+                    ) : (
+                      <span
+                        className={
+                          u.deadKeyCount > 0 ? "text-rose-600" : "text-slate-600"
+                        }
+                      >
+                        {u.deadKeyCount}
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-2.5 pr-3 text-right tabular-nums">
+                    <span
+                      className={
+                        (u.poolPending ?? 0) > 0
+                          ? "text-amber-600"
+                          : "text-slate-600"
+                      }
+                    >
+                      {u.poolPending ?? 0}
+                    </span>
+                  </td>
+                  <td className="py-2.5 pr-3 text-right tabular-nums text-slate-600">
+                    {u.poolUploaded ?? 0}
                   </td>
                   <td className="py-2.5 pr-3">
                     {u.accessKey ? (
@@ -419,7 +518,7 @@ function UsersCard() {
         open={editorOpen}
         target={editTarget}
         onClose={() => setEditorOpen(false)}
-        onSaved={load}
+        onSaved={() => load()}
       />
 
       <UploadKeyModal
@@ -427,7 +526,7 @@ function UsersCard() {
         title={uploadTarget ? `代传 Key · ${uploadTarget.username}` : "代传 Key"}
         endpoint={uploadTarget ? `/api/admin/users/${uploadTarget.id}/upload` : ""}
         onClose={() => setUploadTarget(null)}
-        onUploaded={load}
+        onUploaded={() => load()}
       />
 
       <Modal

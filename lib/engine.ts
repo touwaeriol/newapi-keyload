@@ -1,9 +1,11 @@
-// 定时补 key 引擎：每 60s 从本地 key 池取「配置的每批数量」个 pending key，
-// 批量 append 到对应 naci 渠道并启用全部三站，直到池排空。
+// 定时补 key 引擎（按需补给）：每 60s 检查每个仍有 pending key 的渠道，
+// 仅当渠道「尚不存在」或「存活 key=0（自动禁用）」时，才从本地池取「配置的每批数量」个
+// key 批量 append 到对应 naci 渠道并启用全部三站；否则把 key 留在池里等下次真正缺 key 时再补。
+// 是否缺 key 用只读端点 status-batch 检测（getChannelKeyStatus，不写平台）。
 //
 // 单例守卫挂 globalThis，兼容 Next dev 热重载 / standalone 多次 import，避免重复启动定时器。
 // 引擎内任何异常都被捕获，绝不让 tick 抛出而中断定时器或 crash 进程。
-import { pushBatchToChannel } from "./channelService";
+import { assessRefillNeed, pushBatchToChannel } from "./channelService";
 import {
   addLog,
   channelsWithPending,
@@ -55,7 +57,7 @@ export function getEngineStatus(): {
 }
 
 async function safeLog(
-  level: "info" | "error",
+  level: "info" | "warn" | "error",
   channelName: string | undefined,
   message: string
 ): Promise<void> {
@@ -67,7 +69,8 @@ async function safeLog(
 }
 
 /**
- * 单次调度：遍历所有有 pending key 的渠道，逐个（串行）取一批上传。
+ * 单次调度（按需补给）：遍历所有有 pending key 的渠道，逐个（串行）先只读判定是否缺 key，
+ * 仅在缺 key（渠道不存在 / 存活 key=0）时才取一批上传；有存活 key 则留池不动。
  * isRunning 防重入；单渠道失败 try/catch 隔离（key 保持 pending，下轮重试）。
  */
 export async function tick(): Promise<void> {
@@ -83,6 +86,19 @@ export async function tick(): Promise<void> {
     const channels = await channelsWithPending();
     for (const channelName of channels) {
       try {
+        // 只读判定：渠道是否需要补 key（不写平台）
+        const decision = await assessRefillNeed(channelName);
+        if (decision.status === "unreadable") {
+          // 检测失败：本轮跳过，key 留 pending 下轮重试
+          await safeLog(
+            "warn",
+            channelName,
+            "只读检测渠道状态失败，本轮跳过（下轮重试）"
+          );
+          continue;
+        }
+        if (!decision.needsKeys) continue; // 仍有存活 key，key 留在池里
+
         const batch = await nextPendingBatch(channelName, batchSize);
         if (batch.length === 0) continue;
         await pushBatchToChannel(
@@ -95,7 +111,7 @@ export async function tick(): Promise<void> {
         await safeLog(
           "error",
           channelName,
-          `批量上传失败：${err instanceof Error ? err.message : String(err)}`
+          `补给失败：${err instanceof Error ? err.message : String(err)}`
         );
       }
     }

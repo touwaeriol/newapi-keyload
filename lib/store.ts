@@ -550,6 +550,33 @@ export async function markPoolUploaded(ids: string[]): Promise<void> {
   );
 }
 
+/**
+ * 一次性取所有渠道的池计数（pending/uploaded），供管理员用户列表概览。
+ * 返回以 channelName 为键的映射；无池记录的渠道不在其中（调用方按缺省 0 处理）。
+ */
+export async function poolCountsAll(): Promise<Record<string, PoolCounts>> {
+  const pool = await ensureReady();
+  const { rows } = await pool.query<{
+    channel_name: string;
+    pending: string;
+    uploaded: string;
+  }>(
+    `SELECT channel_name,
+            count(*) FILTER (WHERE status = 'pending')::int  AS pending,
+            count(*) FILTER (WHERE status = 'uploaded')::int AS uploaded
+       FROM key_pool
+      GROUP BY channel_name`
+  );
+  const map: Record<string, PoolCounts> = {};
+  for (const r of rows) {
+    map[r.channel_name] = {
+      pending: Number(r.pending),
+      uploaded: Number(r.uploaded),
+    };
+  }
+  return map;
+}
+
 /** 所有仍有 pending key 的渠道名（去重）。 */
 export async function channelsWithPending(): Promise<string[]> {
   const pool = await ensureReady();
