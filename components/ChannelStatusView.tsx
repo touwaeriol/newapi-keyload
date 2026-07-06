@@ -39,8 +39,12 @@ export interface ChannelStatus {
   uploadBatchSize?: number;
   /** 是否启用自动补 key */
   autoRefillEnabled?: boolean;
+  /** 上一次定时检查时间（ISO 字符串） */
+  lastCheckAt?: string | null;
   /** 下一次定时检查时间（ISO 字符串） */
   nextCheckAt?: string | null;
+  /** 定时引擎当前是否正在检查 */
+  checking?: boolean;
   models?: string;
   priority?: number;
   group?: string;
@@ -307,12 +311,18 @@ function UploadProgress({ channel }: { channel: ChannelStatus }) {
         </div>
       </div>
 
-      {/* 下一次检查 + 预计 */}
+      {/* 上一次检查 + 下一次检查 + 预计 */}
       <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
+        <span>
+          上一次检查：
+          <span className="font-medium text-slate-700">
+            <LastCheck at={channel.lastCheckAt} />
+          </span>
+        </span>
         <span>
           下一次检查：
           <span className="font-medium text-slate-700">
-            <NextCheck at={channel.nextCheckAt} />
+            <NextCheck at={channel.nextCheckAt} checking={channel.checking} />
           </span>
         </span>
         {pending > 0 && batch > 0 && (
@@ -349,15 +359,37 @@ function BigStat({
   );
 }
 
-/** 下一次检查倒计时（每秒刷新）。 */
-function NextCheck({ at }: { at?: string | null }) {
+/** 下一次检查倒计时（每秒刷新）。倒计时归零后显示「检查中…」，等待轮询拿到新的时间。 */
+function NextCheck({
+  at,
+  checking,
+}: {
+  at?: string | null;
+  checking?: boolean;
+}) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, []);
+  if (checking) return <span className="text-brand-600">检查中…</span>;
   if (!at) return <>—</>;
   const ms = new Date(at).getTime() - now;
   const s = Math.max(0, Math.round(ms / 1000));
-  return <>{s > 0 ? `约 ${s} 秒后` : "即将检查"}</>;
+  return <>{s > 0 ? `约 ${s} 秒后` : <span className="text-brand-600">检查中…</span>}</>;
+}
+
+/** 上一次检查时间（每秒刷新的「X 前」相对展示）。 */
+function LastCheck({ at }: { at?: string | null }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  if (!at) return <>尚未检查</>;
+  const s = Math.max(0, Math.round((now - new Date(at).getTime()) / 1000));
+  if (s < 60) return <>{s} 秒前</>;
+  const m = Math.floor(s / 60);
+  if (m < 60) return <>{m} 分钟前</>;
+  return <>{Math.floor(m / 60)} 小时前</>;
 }

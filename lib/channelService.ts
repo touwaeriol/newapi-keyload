@@ -29,13 +29,28 @@ import {
 } from "./store";
 import type { EnqueueResult, KeyStats, NaciChannel, User } from "./types";
 
-/** 读定时引擎的下次调度时间（从 globalThis 读，避免与 engine.ts 循环依赖）。 */
-function engineNextCheckAt(): string | null {
+/**
+ * 读定时引擎调度状态（从 globalThis 读，避免与 engine.ts 循环依赖）：
+ * 上一次检查时间、下一次检查时间、当前是否正在检查。
+ */
+function engineViewState(): {
+  lastCheckAt: string | null;
+  nextCheckAt: string | null;
+  checking: boolean;
+} {
   const g = globalThis as unknown as {
-    __keyloadEngine?: { nextTickAt: number | null };
+    __keyloadEngine?: {
+      lastTickAt: number | null;
+      nextTickAt: number | null;
+      isRunning: boolean;
+    };
   };
-  const ts = g.__keyloadEngine?.nextTickAt ?? null;
-  return ts ? new Date(ts).toISOString() : null;
+  const e = g.__keyloadEngine;
+  return {
+    lastCheckAt: e?.lastTickAt ? new Date(e.lastTickAt).toISOString() : null,
+    nextCheckAt: e?.nextTickAt ? new Date(e.nextTickAt).toISOString() : null,
+    checking: e?.isRunning ?? false,
+  };
 }
 
 /** 单站调度状态（供前端展示 / 手动开关）：status=null 表示平台未返回该站。 */
@@ -293,7 +308,7 @@ export async function resolveMyChannel(user: User) {
   const cfg = await getConfig();
   const uploadBatchSize = cfg.uploadBatchSize;
   const autoRefillEnabled = cfg.autoRefillEnabled;
-  const nextCheckAt = engineNextCheckAt();
+  const { lastCheckAt, nextCheckAt, checking } = engineViewState();
 
   const channelName = user.channelName.trim();
   if (!channelName) {
@@ -305,7 +320,9 @@ export async function resolveMyChannel(user: User) {
       poolUploaded: 0,
       uploadBatchSize,
       autoRefillEnabled,
+      lastCheckAt,
       nextCheckAt,
+      checking,
       sites: sitesWithNames([]),
     };
   }
@@ -334,7 +351,9 @@ export async function resolveMyChannel(user: User) {
       poolUploaded,
       uploadBatchSize,
       autoRefillEnabled,
+      lastCheckAt,
       nextCheckAt,
+      checking,
       sites: sitesWithNames([]),
     };
   }
@@ -378,7 +397,9 @@ export async function resolveMyChannel(user: User) {
     poolUploaded,
     uploadBatchSize,
     autoRefillEnabled,
+    lastCheckAt,
     nextCheckAt,
+    checking,
     platformKeyCount,
     deadKeyCount,
     sites: sitesWithNames(realtime?.sites ?? []),

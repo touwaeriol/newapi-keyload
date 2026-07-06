@@ -15,8 +15,10 @@ import {
   type SiteScheduleStatus,
 } from "@/components/ChannelStatusView";
 
-/** 队列未清空时的轮询间隔（毫秒） */
+/** 常态轮询间隔（毫秒）：保持「上/下一次检查」倒计时与渠道状态新鲜 */
 const POLL_INTERVAL = 15000;
+/** 队列仍有待上传 key 时的更快轮询间隔（毫秒） */
+const POLL_INTERVAL_BUSY = 8000;
 
 /**
  * 关闭站点时提交的 status 值。
@@ -62,13 +64,14 @@ export function UserPanel({ user }: { user: SafeUser }) {
     fetchChannel(false);
   }, [fetchChannel]);
 
-  // 队列仍有待上传 key 时，每 ~15s 静默轮询刷新进度；pending=0 或卸载即停
+  // 常态静默轮询：让「上一次/下一次检查」倒计时与渠道状态持续刷新（引擎每 60s 检查一次）。
+  // 队列仍有待上传 key 时用更快的间隔，让进度更跟手。卸载即停。
   const poolPending = channel?.poolPending ?? 0;
   useEffect(() => {
-    if (poolPending <= 0) return;
+    const interval = poolPending > 0 ? POLL_INTERVAL_BUSY : POLL_INTERVAL;
     const timer = window.setInterval(() => {
       fetchChannel(true);
-    }, POLL_INTERVAL);
+    }, interval);
     return () => window.clearInterval(timer);
   }, [poolPending, fetchChannel]);
 
