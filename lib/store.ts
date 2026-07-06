@@ -8,7 +8,10 @@ import type { LogEntry, LogLevel, Role, SystemConfig, User } from "./types";
 // —— seed 默认值（敏感信息来自环境变量，代码内不留明文） ——
 const DEFAULT_NACI_BASEURL = "https://open.naci-tech.com";
 const SEED_NACI_BASEURL = process.env.NACI_BASE_URL || DEFAULT_NACI_BASEURL;
-const SEED_NACI_TOKEN = process.env.NACI_TOKEN || "";
+const SEED_NACI_TOKEN = "";
+// naci 登录凭据不从环境变量兜底，统一在数据库配置中手动管理
+const SEED_NACI_USERNAME = "";
+const SEED_NACI_PASSWORD = "";
 
 export function genId(): string {
   return crypto.randomBytes(8).toString("hex");
@@ -61,6 +64,13 @@ async function createTables(pool: Pool): Promise<void> {
       naci_token text NOT NULL
     )
   `);
+  // 兼容已存在的线上库：新增 admin-hub 登录字段（缺省空串，不破坏旧数据）。
+  await pool.query(
+    `ALTER TABLE config ADD COLUMN IF NOT EXISTS naci_username text NOT NULL DEFAULT ''`
+  );
+  await pool.query(
+    `ALTER TABLE config ADD COLUMN IF NOT EXISTS naci_password text NOT NULL DEFAULT ''`
+  );
   await pool.query(`
     CREATE TABLE IF NOT EXISTS logs (
       id text PRIMARY KEY,
@@ -104,8 +114,14 @@ async function seed(pool: Pool): Promise<void> {
   );
   if (cfgRows.length === 0) {
     await pool.query(
-      `INSERT INTO config (id, naci_base_url, naci_token) VALUES (1, $1, $2)`,
-      [SEED_NACI_BASEURL, SEED_NACI_TOKEN]
+      `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password)
+       VALUES (1, $1, $2, $3, $4)`,
+      [
+        SEED_NACI_BASEURL,
+        SEED_NACI_TOKEN,
+        SEED_NACI_USERNAME,
+        SEED_NACI_PASSWORD,
+      ]
     );
   }
 }
@@ -268,22 +284,43 @@ export async function getConfig(): Promise<SystemConfig> {
   const { rows } = await pool.query<{
     naci_base_url: string;
     naci_token: string;
-  }>("SELECT naci_base_url, naci_token FROM config WHERE id = 1");
+    naci_username: string;
+    naci_password: string;
+  }>(
+    "SELECT naci_base_url, naci_token, naci_username, naci_password FROM config WHERE id = 1"
+  );
   if (!rows[0]) {
-    return { naciBaseUrl: SEED_NACI_BASEURL, naciToken: "" };
+    return {
+      naciBaseUrl: SEED_NACI_BASEURL,
+      naciToken: SEED_NACI_TOKEN,
+      naciUsername: SEED_NACI_USERNAME,
+      naciPassword: SEED_NACI_PASSWORD,
+    };
   }
-  return { naciBaseUrl: rows[0].naci_base_url, naciToken: rows[0].naci_token };
+  return {
+    naciBaseUrl: rows[0].naci_base_url,
+    naciToken: rows[0].naci_token,
+    naciUsername: rows[0].naci_username,
+    naciPassword: rows[0].naci_password,
+  };
 }
 
 export async function saveConfig(cfg: SystemConfig): Promise<void> {
   const pool = await ensureReady();
   await pool.query(
-    `INSERT INTO config (id, naci_base_url, naci_token)
-     VALUES (1, $1, $2)
+    `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password)
+     VALUES (1, $1, $2, $3, $4)
      ON CONFLICT (id) DO UPDATE SET
        naci_base_url = EXCLUDED.naci_base_url,
-       naci_token = EXCLUDED.naci_token`,
-    [cfg.naciBaseUrl, cfg.naciToken]
+       naci_token = EXCLUDED.naci_token,
+       naci_username = EXCLUDED.naci_username,
+       naci_password = EXCLUDED.naci_password`,
+    [
+      cfg.naciBaseUrl,
+      cfg.naciToken ?? "",
+      cfg.naciUsername ?? "",
+      cfg.naciPassword ?? "",
+    ]
   );
 }
 

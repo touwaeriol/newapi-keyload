@@ -4,6 +4,8 @@ import {
   createChannel,
   findChannelByName,
   getChannel,
+  getKeyStats,
+  reenableAllSites,
   updateChannel,
 } from "./naci";
 import { parseKeys } from "./supplier";
@@ -13,7 +15,13 @@ import {
   recordUploadedKeys,
   upsertUser,
 } from "./store";
-import type { NaciChannel, SiteAmount, UploadResult, User } from "./types";
+import type {
+  KeyStats,
+  NaciChannel,
+  SiteAmount,
+  UploadResult,
+  User,
+} from "./types";
 
 /**
  * 解析用户绑定渠道的 naci id：
@@ -68,6 +76,21 @@ export async function uploadKeys(
     action = "created";
   }
 
+  // 上传即重开所有站点，并拿到平台上的真实 key 统计（multi_key_size / 禁用数）
+  let keyStats: KeyStats | null = null;
+  try {
+    keyStats = await reenableAllSites(channelId);
+  } catch (err) {
+    // 重开失败不阻断上传主流程，记 warn 日志
+    await addLog({
+      level: "warn",
+      actor: user.username,
+      channelName,
+      channelId,
+      message: `重开站点失败：${err instanceof Error ? err.message : String(err)}`,
+    });
+  }
+
   // 回写解析到的 channelId
   if (user.channelId !== channelId) {
     await upsertUser({
@@ -77,7 +100,7 @@ export async function uploadKeys(
     });
   }
 
-  // 拉最新详情取站点发布明细
+  // 拉最新详情取站点发布明细（admin-hub 详情未必带用量，容错处理）
   let siteAmounts: SiteAmount[] | undefined;
   try {
     const detail = await getChannel(channelId);
@@ -94,7 +117,9 @@ export async function uploadKeys(
     actor: user.username,
     channelName,
     channelId,
-    message: `${action === "created" ? "创建渠道并上传" : "向渠道追加"} ${cleanKeys.length} 个 key（累计 ${uploadedKeyCount}）`,
+    message: `${action === "created" ? "创建渠道并上传" : "向渠道追加"} ${cleanKeys.length} 个 key（累计 ${uploadedKeyCount}${
+      keyStats ? `，平台 ${keyStats.platformKeyCount} 个/禁用 ${keyStats.deadKeyCount}` : ""
+    }）`,
   });
 
   return {
@@ -104,6 +129,8 @@ export async function uploadKeys(
     keyCount: cleanKeys.length,
     uploadedKeyCount,
     siteAmounts,
+    platformKeyCount: keyStats?.platformKeyCount,
+    deadKeyCount: keyStats?.deadKeyCount,
   };
 }
 
@@ -131,6 +158,14 @@ export async function resolveMyChannel(user: User) {
     return { exists: false as const, channelName, uploadedKeyCount };
   }
 
+  // 平台真实 key 统计：优先从详情解析，详情未带则不额外触发重开（读操作无副作用）
+  let keyStats: KeyStats | null = null;
+  try {
+    keyStats = await getKeyStats(detail.id);
+  } catch {
+    // 统计失败不影响渠道详情展示
+  }
+
   return {
     exists: true as const,
     channelName,
@@ -144,5 +179,7 @@ export async function resolveMyChannel(user: User) {
     usedAmount: detail.used_amount,
     siteAmounts: detail.site_amounts,
     uploadedKeyCount,
+    platformKeyCount: keyStats?.platformKeyCount,
+    deadKeyCount: keyStats?.deadKeyCount,
   };
 }

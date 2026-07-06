@@ -17,11 +17,15 @@ export interface User {
   updatedAt: string;
 }
 
-/** 系统配置：naci 平台连接信息（后端持有，前端不下发 token 明文给普通用户） */
+/** 系统配置：naci 平台连接信息（后端持有，前端不下发凭据明文给普通用户） */
 export interface SystemConfig {
   naciBaseUrl: string;
-  /** naci new-api 兼容端点的 Bearer token（个人设置页「生成令牌」得到） */
-  naciToken: string;
+  /** admin-hub 登录用户名（后端用其登录拿 session）。运行时优先读环境变量 NACI_USERNAME */
+  naciUsername?: string;
+  /** admin-hub 登录密码。运行时优先读环境变量 NACI_PASSWORD；不建议入库明文 */
+  naciPassword?: string;
+  /** 旧 new-api 兼容端点的 Bearer token（可选；转向 admin-hub 后保留兼容，非必填） */
+  naciToken?: string;
 }
 
 export type LogLevel = "info" | "success" | "warn" | "error";
@@ -49,6 +53,10 @@ export interface UploadResult {
   uploadedKeyCount: number;
   /** naci 详情返回的站点发布明细 */
   siteAmounts?: SiteAmount[];
+  /** 上传并重开站点后，平台上该渠道的真实 key 数（multi_key_size） */
+  platformKeyCount?: number;
+  /** 被禁用（status=3）的 key 数 */
+  deadKeyCount?: number;
   raw?: unknown;
 }
 
@@ -60,7 +68,26 @@ export interface SiteAmount {
   used_amount: number;
 }
 
-/** naci 渠道对象（列表/详情，部分字段） */
+/**
+ * 平台上单个渠道的 key 统计（来自 admin-hub status 响应或渠道 channel_info）。
+ * multi_key_status_list 每项为一个 key 的状态：3 = 自动禁用。
+ */
+export interface KeyStats {
+  /** 平台上该渠道的真实 key 数（multi_key_size） */
+  platformKeyCount: number;
+  /** 被禁用（status=3）的 key 数 */
+  deadKeyCount: number;
+  /** 每个 key 的状态列表（multi_key_status_list） */
+  statusList: number[];
+}
+
+/**
+ * naci 渠道对象（admin-hub 列表/详情）。
+ * admin-hub 顶层字段：id / name / channel_json(字符串) / last_selected_site_ids_json /
+ * site_group_overrides / owner_user_id / used_quota 等；
+ * lib/naci.ts 归一化时会把 channel_json 内部字段（models/group/priority/type/status…）
+ * 展开到顶层，方便消费方直接访问。
+ */
 export interface NaciChannel {
   id: number;
   name: string;
@@ -68,11 +95,22 @@ export interface NaciChannel {
   models: string;
   group: string;
   priority: number;
+  status?: number;
   weight?: number;
   auto_ban?: number;
   used_quota?: number;
   used_amount?: number;
   site_amounts?: SiteAmount[];
+  /** admin-hub 原始 channel_json 字符串 */
+  channelJson?: string;
+  /** 解析后的 channel_json 对象 */
+  channelJsonObj?: Record<string, unknown>;
+  /** admin-hub 站点顺序字符串（如 "[21,13,6]"） */
+  lastSelectedSiteIdsJson?: string;
+  /** admin-hub 各站点分组覆盖 */
+  siteGroupOverrides?: Record<string, string[]>;
+  /** 渠道归属供应商账号 id */
+  ownerUserId?: number;
   [k: string]: unknown;
 }
 
