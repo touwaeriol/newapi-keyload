@@ -72,10 +72,13 @@ function statusBadge(status?: number) {
   }
 }
 
-/** 金额展示：数值保留 4 位小数，非数值原样 */
-function fmtAmount(v?: number) {
-  if (typeof v !== "number" || Number.isNaN(v)) return "0";
-  return v.toFixed(4);
+/** 美元金额展示：$ + 千分位 + 2 位小数（非数值按 $0.00）。 */
+function fmtUsd(v?: number) {
+  const n = typeof v === "number" && !Number.isNaN(v) ? v : 0;
+  return `$${n.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
 }
 
 /** 可用 key 数 = 平台 key 数 − 禁用 key 数；任一缺失返回 null（显示「-」） */
@@ -182,8 +185,13 @@ export function ChannelStatusView({ channel }: { channel: ChannelStatus | null }
       </div>
 
       <div className="grid grid-cols-2 gap-3">
-        <Stat label="used_quota（顶层额度）" value={channel.usedQuota ?? 0} />
-        <Stat label="used_amount（顶层金额）" value={fmtAmount(channel.usedAmount)} />
+        <Stat
+          label="累计金额"
+          value={
+            <span className="text-emerald-600">{fmtUsd(channel.usedAmount)}</span>
+          }
+        />
+        <Stat label="累计额度（quota）" value={channel.usedQuota ?? 0} />
       </div>
 
       {channel.models && (
@@ -211,23 +219,33 @@ export function ChannelStatusView({ channel }: { channel: ChannelStatus | null }
               <thead className="bg-slate-50 text-slate-500">
                 <tr>
                   <th className="px-3 py-2 text-left font-medium">站点</th>
-                  <th className="px-3 py-2 text-left font-medium">远端 ID</th>
-                  <th className="px-3 py-2 text-right font-medium">used_quota</th>
-                  <th className="px-3 py-2 text-right font-medium">used_amount</th>
+                  <th className="px-3 py-2 text-left font-medium">远端渠道 ID</th>
+                  <th className="px-3 py-2 text-right font-medium">金额</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {channel.siteAmounts.map((s) => (
                   <tr key={s.site_id}>
                     <td className="px-3 py-2 text-slate-700">{s.site_name}</td>
-                    <td className="px-3 py-2 text-slate-500">{s.remote_channel_id}</td>
-                    <td className="px-3 py-2 text-right text-slate-600">{s.used_quota}</td>
-                    <td className="px-3 py-2 text-right text-slate-600">
-                      {s.used_amount}
+                    <td className="px-3 py-2 text-slate-500">
+                      #{s.remote_channel_id}
+                    </td>
+                    <td className="px-3 py-2 text-right font-medium text-emerald-600">
+                      {fmtUsd(s.used_amount)}
                     </td>
                   </tr>
                 ))}
               </tbody>
+              <tfoot className="border-t border-slate-200 bg-slate-50 text-slate-600">
+                <tr>
+                  <td className="px-3 py-2 font-medium" colSpan={2}>
+                    合计
+                  </td>
+                  <td className="px-3 py-2 text-right font-semibold text-emerald-700">
+                    {fmtUsd(channel.usedAmount)}
+                  </td>
+                </tr>
+              </tfoot>
             </table>
           </div>
         ) : (

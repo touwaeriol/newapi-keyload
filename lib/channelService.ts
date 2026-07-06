@@ -11,6 +11,7 @@ import {
   getChannelKeyStatus,
   getChannelSites,
   getChannelStatusFull,
+  getChannelUsedQuota,
   reenableAllSites,
   setSiteStatus,
   updateChannel,
@@ -418,6 +419,14 @@ export async function resolveMyChannel(user: User) {
     });
   }
 
+  // 各站点用量与总用量：渠道详情不含，需单独调 used-quota 端点。读失败退回详情顶层（可能为空）。
+  let usage: Awaited<ReturnType<typeof getChannelUsedQuota>> = null;
+  try {
+    usage = await getChannelUsedQuota(detail.id);
+  } catch {
+    usage = null;
+  }
+
   return {
     exists: true as const,
     channelName,
@@ -427,9 +436,9 @@ export async function resolveMyChannel(user: User) {
     models: detail.models,
     priority: detail.priority,
     group: detail.group,
-    usedQuota: detail.used_quota,
-    usedAmount: detail.used_amount,
-    siteAmounts: detail.site_amounts,
+    usedQuota: usage?.usedQuota ?? detail.used_quota,
+    usedAmount: usage?.usedAmount ?? detail.used_amount,
+    siteAmounts: usage?.sites ?? detail.site_amounts,
     uploadedKeyCount,
     poolPending,
     poolUploaded,

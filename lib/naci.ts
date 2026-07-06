@@ -568,6 +568,62 @@ export async function getChannelStatusFull(id: number): Promise<{
   };
 }
 
+/** naci 额度换算美元的除数（new-api quota_per_unit，实测 400176361→$800.35）。 */
+export const QUOTA_PER_USD = 500000;
+
+/** 单站点用量（used-quota 端点返回）。used_amount = used_quota / QUOTA_PER_USD。 */
+export interface SiteUsedQuota {
+  site_id: number;
+  site_name: string;
+  remote_channel_id: number;
+  used_quota: number;
+  used_amount: number;
+}
+
+/**
+ * 读取聚合渠道的各站点用量与总用量（渠道详情不含此数据，需单独调用）：
+ * POST /api/admin-hub/channels/used-quota {ids:[id]}
+ * → data[id] = { sites:[{remote_channel_id,site_id,site_name,used_quota}], used_quota:总额 }。
+ * used_amount 由 used_quota / QUOTA_PER_USD 换算为美元。读失败/无数据返回 null。
+ */
+export async function getChannelUsedQuota(id: number): Promise<{
+  usedQuota: number;
+  usedAmount: number;
+  sites: SiteUsedQuota[];
+} | null> {
+  const env = await naciFetch<Record<string, unknown>>(
+    "POST",
+    "/api/admin-hub/channels/used-quota",
+    { ids: [id] }
+  );
+  const data = env.data;
+  if (!data || typeof data !== "object") return null;
+  const entry = (data as Record<string, unknown>)[String(id)];
+  if (!entry || typeof entry !== "object") return null;
+
+  const e = entry as { sites?: unknown; used_quota?: unknown };
+  const rawSites = Array.isArray(e.sites) ? e.sites : [];
+  const sites: SiteUsedQuota[] = rawSites
+    .filter((s): s is Record<string, unknown> => !!s && typeof s === "object")
+    .map((s) => {
+      const usedQuota = Number(s.used_quota) || 0;
+      return {
+        site_id: Number(s.site_id) || 0,
+        site_name: typeof s.site_name === "string" ? s.site_name : "",
+        remote_channel_id: Number(s.remote_channel_id) || 0,
+        used_quota: usedQuota,
+        used_amount: usedQuota / QUOTA_PER_USD,
+      };
+    });
+
+  const totalQuota = Number(e.used_quota) || 0;
+  return {
+    usedQuota: totalQuota,
+    usedAmount: totalQuota / QUOTA_PER_USD,
+    sites,
+  };
+}
+
 /**
  * 只读读取渠道各站点的调度状态（不写平台）。基于 getChannelStatusFull，
  * 读失败 / 无数据一律返回 []（调用方自行用 SITES 补全站名与缺省状态）。
