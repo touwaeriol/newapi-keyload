@@ -79,7 +79,7 @@ export default function Page() {
       {phase === "ready" && user && (
         <div className="min-h-screen">
           <Header user={user} onLogout={logout} />
-          <main className="mx-auto max-w-6xl px-4 py-4">
+          <main className="mx-auto max-w-screen-2xl px-4 py-4 sm:px-6">
             {user.role === "admin" ? <AdminPanel /> : <UserPanel user={user} />}
           </main>
         </div>
@@ -97,7 +97,7 @@ function Header({
 }) {
   return (
     <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/80 backdrop-blur">
-      <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
+      <div className="mx-auto flex max-w-screen-2xl items-center justify-between px-4 py-3 sm:px-6">
         <div className="flex items-center gap-2.5">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-600 text-sm font-bold text-white">
             K
