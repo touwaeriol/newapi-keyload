@@ -39,12 +39,16 @@ export interface ChannelStatus {
   uploadBatchSize?: number;
   /** 是否启用自动补 key */
   autoRefillEnabled?: boolean;
-  /** 上一次定时检查时间（ISO 字符串） */
-  lastCheckAt?: string | null;
   /** 下一次定时检查时间（ISO 字符串） */
   nextCheckAt?: string | null;
   /** 定时引擎当前是否正在检查 */
   checking?: boolean;
+  /** 该渠道最近一次检查的结果/执行说明 */
+  lastCheck?: {
+    at: string;
+    status: string;
+    message: string;
+  } | null;
   models?: string;
   priority?: number;
   group?: string;
@@ -311,14 +315,11 @@ function UploadProgress({ channel }: { channel: ChannelStatus }) {
         </div>
       </div>
 
-      {/* 上一次检查 + 下一次检查 + 预计 */}
-      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
-        <span>
-          上一次检查：
-          <span className="font-medium text-slate-700">
-            <LastCheck at={channel.lastCheckAt} />
-          </span>
-        </span>
+      {/* 上一次检查结果 */}
+      <LastCheckResult check={channel.lastCheck} />
+
+      {/* 下一次检查 + 预计 */}
+      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
         <span>
           下一次检查：
           <span className="font-medium text-slate-700">
@@ -379,17 +380,68 @@ function NextCheck({
   return <>{s > 0 ? `约 ${s} 秒后` : <span className="text-brand-600">检查中…</span>}</>;
 }
 
-/** 上一次检查时间（每秒刷新的「X 前」相对展示）。 */
-function LastCheck({ at }: { at?: string | null }) {
+/** 相对时间「X 前」文案（不含组件状态）。 */
+function relativeTime(atMs: number, now: number): string {
+  const s = Math.max(0, Math.round((now - atMs) / 1000));
+  if (s < 60) return `${s} 秒前`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} 分钟前`;
+  return `${Math.floor(m / 60)} 小时前`;
+}
+
+/** 检查结果状态 → 圆点颜色。 */
+function statusDot(status: string): string {
+  switch (status) {
+    case "alive":
+      return "bg-emerald-500";
+    case "exhausted":
+    case "missing":
+      return "bg-amber-500";
+    case "manual":
+      return "bg-slate-400";
+    case "unreadable":
+      return "bg-rose-500";
+    default:
+      return "bg-slate-400";
+  }
+}
+
+/** 上一次检查结果：状态圆点 + 结果/执行说明 + 相对时间（每秒刷新）。 */
+function LastCheckResult({
+  check,
+}: {
+  check?: { at: string; status: string; message: string } | null;
+}) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, []);
-  if (!at) return <>尚未检查</>;
-  const s = Math.max(0, Math.round((now - new Date(at).getTime()) / 1000));
-  if (s < 60) return <>{s} 秒前</>;
-  const m = Math.floor(s / 60);
-  if (m < 60) return <>{m} 分钟前</>;
-  return <>{Math.floor(m / 60)} 小时前</>;
+
+  if (!check) {
+    return (
+      <div className="mt-3 rounded-lg bg-white/60 px-3 py-2 text-xs text-slate-400">
+        上次检查：尚未执行首次检查
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-3 rounded-lg bg-white/60 px-3 py-2">
+      <div className="flex items-start gap-2">
+        <span
+          className={`mt-1 h-2 w-2 shrink-0 rounded-full ${statusDot(
+            check.status
+          )}`}
+        />
+        <div className="min-w-0 text-xs">
+          <span className="text-slate-400">上次检查结果：</span>
+          <span className="font-medium text-slate-700">{check.message}</span>
+          <span className="ml-1 text-slate-400">
+            （{relativeTime(new Date(check.at).getTime(), now)}）
+          </span>
+        </div>
+      </div>
+    </div>
+  );
 }

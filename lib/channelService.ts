@@ -29,27 +29,40 @@ import {
 } from "./store";
 import type { EnqueueResult, KeyStats, NaciChannel, User } from "./types";
 
+/** 单渠道最近一次检查结果（前端展示用）。 */
+export interface LastCheckView {
+  at: string; // ISO
+  status: string;
+  message: string;
+}
+
 /**
  * 读定时引擎调度状态（从 globalThis 读，避免与 engine.ts 循环依赖）：
- * 上一次检查时间、下一次检查时间、当前是否正在检查。
+ * 下一次检查时间、当前是否正在检查，以及该渠道最近一次检查的结果/执行说明。
  */
-function engineViewState(): {
-  lastCheckAt: string | null;
+function engineViewState(channelName?: string): {
   nextCheckAt: string | null;
   checking: boolean;
+  lastCheck: LastCheckView | null;
 } {
   const g = globalThis as unknown as {
     __keyloadEngine?: {
-      lastTickAt: number | null;
       nextTickAt: number | null;
       isRunning: boolean;
+      lastResults?: Record<
+        string,
+        { at: number; status: string; message: string }
+      >;
     };
   };
   const e = g.__keyloadEngine;
+  const r = channelName ? e?.lastResults?.[channelName.trim()] : undefined;
   return {
-    lastCheckAt: e?.lastTickAt ? new Date(e.lastTickAt).toISOString() : null,
     nextCheckAt: e?.nextTickAt ? new Date(e.nextTickAt).toISOString() : null,
     checking: e?.isRunning ?? false,
+    lastCheck: r
+      ? { at: new Date(r.at).toISOString(), status: r.status, message: r.message }
+      : null,
   };
 }
 
@@ -240,6 +253,12 @@ export interface RefillDecision {
   status: "missing" | "exhausted" | "alive" | "manual" | "unreadable";
   /** 已解析的渠道 id（渠道存在时），否则 null。 */
   channelId: number | null;
+  /** 平台真实 key 数（multi_key_size）；渠道不存在/读失败时为 null。 */
+  platformKeyCount: number | null;
+  /** 被禁用（status=3）的 key 数；渠道不存在/读失败时为 null。 */
+  deadKeyCount: number | null;
+  /** 存活可用 key 数（platform-dead）；渠道不存在/读失败时为 null。 */
+  aliveKeyCount: number | null;
 }
 
 /**
@@ -258,14 +277,21 @@ export interface RefillDecision {
 export async function assessRefillNeed(
   channelName: string
 ): Promise<RefillDecision> {
+  const noStats = {
+    platformKeyCount: null,
+    deadKeyCount: null,
+    aliveKeyCount: null,
+  };
+
   const name = channelName.trim();
-  if (!name) return { needsKeys: false, status: "unreadable", channelId: null };
+  if (!name)
+    return { needsKeys: false, status: "unreadable", channelId: null, ...noStats };
 
   const user = await findUserByChannelName(name);
   const existing = await resolveChannelByName(name, user?.channelId);
 
   if (!existing) {
-    return { needsKeys: true, status: "missing", channelId: null };
+    return { needsKeys: true, status: "missing", channelId: null, ...noStats };
   }
 
   // 回写 channelId 缓存（渠道已解析到 id）
@@ -280,7 +306,12 @@ export async function assessRefillNeed(
   // 先只读检测真实 key 统计（对所有已存在渠道都读，含手动禁用的，保证缓存新鲜）。
   const stat = await getChannelKeyStatus(existing.id);
   if (!stat) {
-    return { needsKeys: false, status: "unreadable", channelId: existing.id };
+    return {
+      needsKeys: false,
+      status: "unreadable",
+      channelId: existing.id,
+      ...noStats,
+    };
   }
 
   // 用只读检测读到的真实统计刷新缓存（补与不补、含手动禁用的轮次都刷新，让前端始终显示真实可用数）
@@ -291,16 +322,22 @@ export async function assessRefillNeed(
     });
   }
 
+  const stats = {
+    platformKeyCount: stat.multiKeySize,
+    deadKeyCount: stat.deadCount,
+    aliveKeyCount: stat.aliveCount,
+  };
+
   // 手动禁用（status===2）：人工干预，缓存已刷新但不自动补 key。
   // 注：keys 全 status=3 时渠道 status 仍为 1（启用），那是「自动禁用」态，需补。
   if (typeof existing.status === "number" && existing.status === 2) {
-    return { needsKeys: false, status: "manual", channelId: existing.id };
+    return { needsKeys: false, status: "manual", channelId: existing.id, ...stats };
   }
 
   if (stat.aliveCount === 0) {
-    return { needsKeys: true, status: "exhausted", channelId: existing.id };
+    return { needsKeys: true, status: "exhausted", channelId: existing.id, ...stats };
   }
-  return { needsKeys: false, status: "alive", channelId: existing.id };
+  return { needsKeys: false, status: "alive", channelId: existing.id, ...stats };
 }
 
 /** 供 GET /api/my/channel 用：解析并返回渠道详情 + 本地池进度，不写 key。 */
@@ -308,9 +345,10 @@ export async function resolveMyChannel(user: User) {
   const cfg = await getConfig();
   const uploadBatchSize = cfg.uploadBatchSize;
   const autoRefillEnabled = cfg.autoRefillEnabled;
-  const { lastCheckAt, nextCheckAt, checking } = engineViewState();
 
   const channelName = user.channelName.trim();
+  const { nextCheckAt, checking, lastCheck } = engineViewState(channelName);
+
   if (!channelName) {
     return {
       exists: false as const,
@@ -320,9 +358,9 @@ export async function resolveMyChannel(user: User) {
       poolUploaded: 0,
       uploadBatchSize,
       autoRefillEnabled,
-      lastCheckAt,
       nextCheckAt,
       checking,
+      lastCheck,
       sites: sitesWithNames([]),
     };
   }
@@ -351,9 +389,9 @@ export async function resolveMyChannel(user: User) {
       poolUploaded,
       uploadBatchSize,
       autoRefillEnabled,
-      lastCheckAt,
       nextCheckAt,
       checking,
+      lastCheck,
       sites: sitesWithNames([]),
     };
   }
@@ -397,9 +435,9 @@ export async function resolveMyChannel(user: User) {
     poolUploaded,
     uploadBatchSize,
     autoRefillEnabled,
-    lastCheckAt,
     nextCheckAt,
     checking,
+    lastCheck,
     platformKeyCount,
     deadKeyCount,
     sites: sitesWithNames(realtime?.sites ?? []),

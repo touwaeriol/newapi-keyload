@@ -21,12 +21,20 @@ import {
 const TICK_INTERVAL_MS = 60_000;
 const INITIAL_DELAY_MS = 5_000;
 
+/** 单渠道最近一次检查结果（供前端展示「上次检查做了什么/结果如何」）。 */
+export interface LastCheckResult {
+  at: number; // 检查完成时间戳(ms)
+  status: "missing" | "exhausted" | "alive" | "manual" | "unreadable";
+  message: string; // 人类可读的结果/执行说明
+}
+
 interface EngineState {
   started: boolean;
   isRunning: boolean;
   timer: ReturnType<typeof setInterval> | null;
   lastTickAt: number | null; // 上次调度开始时间戳(ms)
   nextTickAt: number | null; // 预计下次调度时间戳(ms)
+  lastResults: Record<string, LastCheckResult>; // 按渠道名记录最近一次检查结果
 }
 
 function engineState(): EngineState {
@@ -38,9 +46,22 @@ function engineState(): EngineState {
       timer: null,
       lastTickAt: null,
       nextTickAt: null,
+      lastResults: {},
     };
+  } else if (!g.__keyloadEngine.lastResults) {
+    // 兼容旧单例（热重载时已存在但无该字段）
+    g.__keyloadEngine.lastResults = {};
   }
   return g.__keyloadEngine;
+}
+
+/** 记录某渠道本轮检查结果（覆盖上一轮）。 */
+function recordResult(
+  channelName: string,
+  status: LastCheckResult["status"],
+  message: string
+): void {
+  engineState().lastResults[channelName] = { at: Date.now(), status, message };
 }
 
 /** 引擎调度状态：供前端展示「下一次检查」等。 */
@@ -106,6 +127,11 @@ export async function tick(): Promise<void> {
         const decision = await assessRefillNeed(channelName);
         if (decision.status === "unreadable") {
           // 读失败：保留上次缓存，本轮跳过（不补、不清缓存），key 留 pending 下轮重试
+          recordResult(
+            channelName,
+            "unreadable",
+            "读取渠道状态失败，本轮跳过，稍后重试"
+          );
           await safeLog(
             "warn",
             channelName,
@@ -113,18 +139,70 @@ export async function tick(): Promise<void> {
           );
           continue;
         }
-        // 仅「缺 key」且「有 pending」才补一批；没 pending 的渠道只刷新缓存、不补
-        if (!decision.needsKeys || !pendingSet.has(channelName)) continue;
 
-        const batch = await nextPendingBatch(channelName, batchSize);
-        if (batch.length === 0) continue;
-        await pushBatchToChannel(
-          channelName,
-          batch.map((b) => b.key)
-        );
-        await markPoolUploaded(batch.map((b) => b.id));
+        const p = decision.platformKeyCount;
+        const d = decision.deadKeyCount;
+        const alive = decision.aliveKeyCount;
+        const stats = p != null && d != null ? `（平台 ${p}/禁用 ${d}）` : "";
+
+        // 仅「缺 key」且「有 pending」才补一批；否则记录「无需/无法补」的结果
+        if (decision.needsKeys && pendingSet.has(channelName)) {
+          const batch = await nextPendingBatch(channelName, batchSize);
+          if (batch.length > 0) {
+            await pushBatchToChannel(
+              channelName,
+              batch.map((b) => b.key)
+            );
+            await markPoolUploaded(batch.map((b) => b.id));
+            recordResult(
+              channelName,
+              decision.status,
+              decision.status === "missing"
+                ? `渠道原不存在，已创建并上传 ${batch.length} 个 key`
+                : `无可用 key${stats}，已补充上传 ${batch.length} 个 key`
+            );
+            continue;
+          }
+        }
+
+        // 未上传：记录检查结论
+        switch (decision.status) {
+          case "alive":
+            recordResult(
+              channelName,
+              "alive",
+              `可用 ${alive} 个 key${stats}，无需补给`
+            );
+            break;
+          case "exhausted":
+            recordResult(
+              channelName,
+              "exhausted",
+              `无可用 key${stats}，队列已空，等待新 key`
+            );
+            break;
+          case "missing":
+            recordResult(
+              channelName,
+              "missing",
+              "渠道未创建，队列暂无可上传 key"
+            );
+            break;
+          case "manual":
+            recordResult(
+              channelName,
+              "manual",
+              `渠道被手动禁用${stats}，跳过自动补给`
+            );
+            break;
+        }
       } catch (err) {
         // 单渠道失败不影响其它渠道；key 未标记 uploaded，下轮重试
+        recordResult(
+          channelName,
+          "unreadable",
+          `补给失败：${err instanceof Error ? err.message : String(err)}`
+        );
         await safeLog(
           "error",
           channelName,
