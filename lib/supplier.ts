@@ -24,6 +24,8 @@ export const CHANNEL_TEMPLATE = {
   model_series: "anthropic.claude",
   platform_channel_type: "anthropic_claude",
   provider_id: 3,
+  // 聚合渠道：多个 key 聚合进单个渠道，配合 multi_key_mode 轮询取用
+  create_mode: "multi_to_single",
   multi_key_mode: "random",
   auto_ban: 1,
   weight: 1,

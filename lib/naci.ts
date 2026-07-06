@@ -75,13 +75,17 @@ export async function getChannel(id: number): Promise<NaciChannel> {
   return naciFetch<NaciChannel>("GET", `/api/channel/${id}`);
 }
 
-/** 创建渠道：wrapped 格式，渠道字段在 channel 内，返回本地模板 id */
+/**
+ * 创建聚合渠道：wrapped 格式，渠道字段在 channel 内，返回本地模板 id。
+ * mode=multi_to_single + channel.create_mode=multi_to_single：
+ * 多个 key 聚合进单个渠道，配合 multi_key_mode=random 轮询取用。
+ */
 export async function createChannel(params: {
   name: string;
   keyText: string; // 已用 \n 连接的多 key
 }): Promise<{ id: number; ids: number[] }> {
   const body = {
-    mode: "single",
+    mode: "multi_to_single",
     multi_key_mode: CHANNEL_TEMPLATE.multi_key_mode,
     channel: {
       ...CHANNEL_TEMPLATE,
@@ -92,17 +96,37 @@ export async function createChannel(params: {
   return naciFetch<{ id: number; ids: number[] }>("POST", "/api/channel/", body);
 }
 
-/** 更新渠道：扁平格式，id 顶层，key_mode=append 追加 key，返回更新后的渠道对象 */
+/**
+ * 更新渠道：先 GET 详情保留渠道当前真实配置，只追加 key 后再 PUT。
+ * 避免用固定模板整体覆盖渠道（会清掉平台上已被修改的 models/分组/优先级/设置等）。
+ * - 以详情字段为准；模板仅兜底补详情不返回的必填字段（multi_key_mode / platform_channel_type / base_url 等）。
+ * - 剥离用量/只读字段（site_amounts / used_quota / used_amount）后再回传。
+ * - key_mode=append 追加，不覆盖已有 key。
+ */
 export async function updateChannel(params: {
   id: number;
   name: string;
   keyText: string;
 }): Promise<NaciChannel> {
+  const detail = await getChannel(params.id);
+  const {
+    site_amounts,
+    used_quota,
+    used_amount,
+    ...current
+  } = detail as NaciChannel & {
+    site_amounts?: unknown;
+    used_quota?: unknown;
+    used_amount?: unknown;
+  };
+
   const body = {
+    ...CHANNEL_TEMPLATE, // 兜底补齐详情不返回的必填字段
+    ...current, // 渠道当前真实配置优先（models/分组/优先级/设置/状态等）
     id: params.id,
-    ...CHANNEL_TEMPLATE,
     name: params.name,
     key: params.keyText,
+    key_mode: "append" as const,
   };
   return naciFetch<NaciChannel>("PUT", "/api/channel/", body);
 }
