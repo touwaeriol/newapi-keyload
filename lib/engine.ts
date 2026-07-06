@@ -93,11 +93,96 @@ async function safeLog(
 }
 
 /**
+ * 处理单个渠道（只读检测 + 按需补一批）：assessRefillNeed 一次 status-batch 既刷新真实统计缓存、
+ * 又判定是否缺 key；仅当「缺 key」且池里确有 pending（nextPendingBatch 非空）时才上传一批并重开三站，
+ * 否则只记录检查结论。异常自行捕获记 error（不外抛，key 保持 pending 下轮/下次重试）。
+ */
+async function processChannel(
+  channelName: string,
+  batchSize: number
+): Promise<void> {
+  try {
+    const decision = await assessRefillNeed(channelName);
+    if (decision.status === "unreadable") {
+      recordResult(
+        channelName,
+        "unreadable",
+        "读取渠道状态失败，本轮跳过，稍后重试"
+      );
+      await safeLog(
+        "warn",
+        channelName,
+        "只读检测渠道状态失败，本轮跳过（保留缓存，下轮重试）"
+      );
+      return;
+    }
+
+    const p = decision.platformKeyCount;
+    const d = decision.deadKeyCount;
+    const alive = decision.aliveKeyCount;
+    const stats = p != null && d != null ? `（平台 ${p}/禁用 ${d}）` : "";
+
+    // 缺 key 时才尝试取一批；nextPendingBatch 空即池无待上传，退回记录结论
+    if (decision.needsKeys) {
+      const batch = await nextPendingBatch(channelName, batchSize);
+      if (batch.length > 0) {
+        await pushBatchToChannel(
+          channelName,
+          batch.map((b) => b.key)
+        );
+        await markPoolUploaded(batch.map((b) => b.id));
+        recordResult(
+          channelName,
+          decision.status,
+          decision.status === "missing"
+            ? `渠道原不存在，已创建并上传 ${batch.length} 个 key`
+            : `无可用 key${stats}，已补充上传 ${batch.length} 个 key`
+        );
+        return;
+      }
+    }
+
+    // 未上传：记录检查结论
+    switch (decision.status) {
+      case "alive":
+        recordResult(channelName, "alive", `可用 ${alive} 个 key${stats}，无需补给`);
+        break;
+      case "exhausted":
+        recordResult(
+          channelName,
+          "exhausted",
+          `无可用 key${stats}，队列已空，等待新 key`
+        );
+        break;
+      case "missing":
+        recordResult(channelName, "missing", "渠道未创建，队列暂无可上传 key");
+        break;
+      case "manual":
+        recordResult(
+          channelName,
+          "manual",
+          `渠道被手动禁用${stats}，跳过自动补给`
+        );
+        break;
+    }
+  } catch (err) {
+    // 单渠道失败不影响其它渠道；key 未标记 uploaded，下轮/下次重试
+    recordResult(
+      channelName,
+      "unreadable",
+      `补给失败：${err instanceof Error ? err.message : String(err)}`
+    );
+    await safeLog(
+      "error",
+      channelName,
+      `补给失败：${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
+
+/**
  * 单次调度（按需补给 + 缓存刷新）：遍历「已解析出 channelId 的绑定渠道」∪「有 pending 的渠道」，
- * 逐个（串行）用 assessRefillNeed 只读检测一次 status-batch：
- *   - 顺带把真实 key 统计写回用户缓存（让池已排空的渠道也保持新鲜，管理员列表 ≤60s 真实）；
- *   - 判定是否缺 key。仅当「缺 key」**且该渠道有 pending** 时才取一批上传；否则只刷新缓存不补。
- * isRunning 防重入；单渠道失败 try/catch 隔离（key 保持 pending，下轮重试）；naci 读失败保留缓存跳过。
+ * 逐个（串行）processChannel。isRunning 防重入。
  */
 export async function tick(): Promise<void> {
   const state = engineState();
@@ -110,105 +195,17 @@ export async function tick(): Promise<void> {
     const batchSize = clampBatchSize(cfg.uploadBatchSize);
 
     // 目标渠道 = 已解析出 channelId 的绑定渠道（需刷新缓存）∪ 有 pending 的渠道（可能需补/首建）。
-    // 前者保证池已排空的渠道也每轮刷新真实统计；后者保证首次上传能创建、缺 key 能补。
     const users = await getUsers();
     const resolvedBound = users
       .filter((u) => u.channelName.trim().length > 0 && u.channelId != null)
       .map((u) => u.channelName.trim());
     const pendingChannels = await channelsWithPending();
-    const pendingSet = new Set(pendingChannels);
     const targets = Array.from(
       new Set([...resolvedBound, ...pendingChannels])
     );
 
     for (const channelName of targets) {
-      try {
-        // 一次只读 status-batch：assessRefillNeed 内部既刷新真实统计缓存，又判定是否缺 key
-        const decision = await assessRefillNeed(channelName);
-        if (decision.status === "unreadable") {
-          // 读失败：保留上次缓存，本轮跳过（不补、不清缓存），key 留 pending 下轮重试
-          recordResult(
-            channelName,
-            "unreadable",
-            "读取渠道状态失败，本轮跳过，稍后重试"
-          );
-          await safeLog(
-            "warn",
-            channelName,
-            "只读检测渠道状态失败，本轮跳过（保留缓存，下轮重试）"
-          );
-          continue;
-        }
-
-        const p = decision.platformKeyCount;
-        const d = decision.deadKeyCount;
-        const alive = decision.aliveKeyCount;
-        const stats = p != null && d != null ? `（平台 ${p}/禁用 ${d}）` : "";
-
-        // 仅「缺 key」且「有 pending」才补一批；否则记录「无需/无法补」的结果
-        if (decision.needsKeys && pendingSet.has(channelName)) {
-          const batch = await nextPendingBatch(channelName, batchSize);
-          if (batch.length > 0) {
-            await pushBatchToChannel(
-              channelName,
-              batch.map((b) => b.key)
-            );
-            await markPoolUploaded(batch.map((b) => b.id));
-            recordResult(
-              channelName,
-              decision.status,
-              decision.status === "missing"
-                ? `渠道原不存在，已创建并上传 ${batch.length} 个 key`
-                : `无可用 key${stats}，已补充上传 ${batch.length} 个 key`
-            );
-            continue;
-          }
-        }
-
-        // 未上传：记录检查结论
-        switch (decision.status) {
-          case "alive":
-            recordResult(
-              channelName,
-              "alive",
-              `可用 ${alive} 个 key${stats}，无需补给`
-            );
-            break;
-          case "exhausted":
-            recordResult(
-              channelName,
-              "exhausted",
-              `无可用 key${stats}，队列已空，等待新 key`
-            );
-            break;
-          case "missing":
-            recordResult(
-              channelName,
-              "missing",
-              "渠道未创建，队列暂无可上传 key"
-            );
-            break;
-          case "manual":
-            recordResult(
-              channelName,
-              "manual",
-              `渠道被手动禁用${stats}，跳过自动补给`
-            );
-            break;
-        }
-      } catch (err) {
-        // 单渠道失败不影响其它渠道；key 未标记 uploaded，下轮重试
-        recordResult(
-          channelName,
-          "unreadable",
-          `补给失败：${err instanceof Error ? err.message : String(err)}`
-        );
-        await safeLog(
-          "error",
-          channelName,
-          `补给失败：${err instanceof Error ? err.message : String(err)}`
-        );
-      }
+      await processChannel(channelName, batchSize);
     }
   } catch (err) {
     // 顶层兜底：绝不让 tick 抛出
@@ -217,6 +214,34 @@ export async function tick(): Promise<void> {
     state.isRunning = false;
     state.nextTickAt = Date.now() + TICK_INTERVAL_MS;
   }
+}
+
+/**
+ * 用户上传 key 后立即 kick 一次（只处理该渠道），避免等待整分钟定时轮。
+ * **已有调度在跑（isRunning）则直接忽略**：交给当前那轮或下一轮处理（用户要求「除非已有任务再进行」）。
+ * fire-and-forget：同步返回，实际补给在后台异步执行，不阻塞上传响应。
+ */
+export function kickEngine(channelName: string): void {
+  const state = engineState();
+  if (state.isRunning) return; // 已有任务在跑，交给它/下一轮
+  const name = channelName.trim();
+  if (!name) return;
+  void (async () => {
+    // 再次判重并同步置位（Node 单线程，置位前无 await，不会与 tick 并发）
+    if (state.isRunning) return;
+    state.isRunning = true;
+    state.lastTickAt = Date.now();
+    try {
+      const cfg = await getConfig();
+      if (!cfg.autoRefillEnabled) return; // 自动补 key 关闭
+      const batchSize = clampBatchSize(cfg.uploadBatchSize);
+      await processChannel(name, batchSize);
+    } catch (err) {
+      console.error("[engine] kick 失败:", err);
+    } finally {
+      state.isRunning = false;
+    }
+  })();
 }
 
 /** 启动定时引擎（幂等，重复调用只启动一次）。 */

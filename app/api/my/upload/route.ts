@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { errorResponse, fail, ok, requireUser } from "@/lib/auth";
 import { parseKeys } from "@/lib/supplier";
 import { enqueueKeys } from "@/lib/channelService";
+import { kickEngine } from "@/lib/engine";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,6 +19,8 @@ export async function POST(req: NextRequest) {
     if (keys.length === 0) return fail("请提供至少一个 key");
 
     const result = await enqueueKeys(user, keys);
+    // 入队后立即 kick 引擎：若渠道正缺 key 则马上上传，不等整分钟定时轮；已有调度在跑则忽略
+    kickEngine(user.channelName);
     return ok(result);
   } catch (err) {
     return errorResponse(err);
