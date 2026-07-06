@@ -4,15 +4,25 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { SafeUser } from "@/lib/types";
 import { apiFetch } from "@/lib/client";
 import { useToast } from "@/components/Toast";
-import { Button, Card, Spinner } from "@/components/ui";
+import { Badge, Button, Card, Spinner } from "@/components/ui";
 import {
   UploadResultView,
   type UploadQueueResult,
 } from "@/components/UploadKeyModal";
-import { ChannelStatusView, type ChannelStatus } from "@/components/ChannelStatusView";
+import {
+  ChannelStatusView,
+  type ChannelStatus,
+  type SiteScheduleStatus,
+} from "@/components/ChannelStatusView";
 
 /** 队列未清空时的轮询间隔（毫秒） */
 const POLL_INTERVAL = 15000;
+
+/**
+ * 关闭站点时提交的 status 值。
+ * TODO(团队待确认)：暂用 2（手动禁用）。team-lead 与用户确认后只需改这一个常量。
+ */
+const SITE_CLOSE_STATUS = 2;
 
 export function UserPanel({ user }: { user: SafeUser }) {
   const toast = useToast();
@@ -62,6 +72,11 @@ export function UserPanel({ user }: { user: SafeUser }) {
     return () => window.clearInterval(timer);
   }, [poolPending, fetchChannel]);
 
+  // 站点开关成功后，用后端返回的最新 sites 就地刷新渠道状态
+  const handleSitesChange = useCallback((sites: SiteScheduleStatus[]) => {
+    setChannel((prev) => (prev ? { ...prev, sites } : prev));
+  }, []);
+
   return (
     <div className="grid gap-6 lg:grid-cols-2">
       <ChannelCard
@@ -69,6 +84,7 @@ export function UserPanel({ user }: { user: SafeUser }) {
         channel={channel}
         loading={loading}
         onRefresh={() => fetchChannel(false)}
+        onSitesChange={handleSitesChange}
       />
       <UploadCard onUploaded={() => fetchChannel(false)} />
     </div>
@@ -82,12 +98,15 @@ function ChannelCard({
   channel,
   loading,
   onRefresh,
+  onSitesChange,
 }: {
   user: SafeUser;
   channel: ChannelStatus | null;
   loading: boolean;
   onRefresh: () => void;
+  onSitesChange: (sites: SiteScheduleStatus[]) => void;
 }) {
+  const sites = channel?.sites ?? [];
   return (
     <Card
       title="我的渠道"
@@ -103,9 +122,144 @@ function ChannelCard({
           <Spinner className="h-4 w-4" /> 加载中…
         </div>
       ) : (
-        <ChannelStatusView channel={channel} />
+        <div className="space-y-4">
+          <ChannelStatusView channel={channel} />
+          {sites.length > 0 && (
+            <SiteScheduleSection sites={sites} onSitesChange={onSitesChange} />
+          )}
+        </div>
       )}
     </Card>
+  );
+}
+
+/* ============ 站点调度（每站开关） ============ */
+
+/** 站点状态徽章：1 开启 / 3 自动禁用 / 2 手动禁用 / 0 已关闭 / 其它未知 */
+function siteBadge(status: number | null) {
+  switch (status) {
+    case 1:
+      return <Badge tone="green">开启</Badge>;
+    case 3:
+      return <Badge tone="rose">自动禁用</Badge>;
+    case 2:
+      return <Badge tone="slate">手动禁用</Badge>;
+    case 0:
+      return <Badge tone="slate">已关闭</Badge>;
+    default:
+      return <Badge tone="slate">未知</Badge>;
+  }
+}
+
+/** 纯 Tailwind 开关：on=开启，busy 时禁用 */
+function Toggle({
+  on,
+  disabled,
+  onChange,
+}: {
+  on: boolean;
+  disabled: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      disabled={disabled}
+      onClick={() => onChange(!on)}
+      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition disabled:cursor-not-allowed disabled:opacity-50 ${
+        on ? "bg-emerald-500" : "bg-slate-300"
+      }`}
+    >
+      <span
+        className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition ${
+          on ? "translate-x-6" : "translate-x-1"
+        }`}
+      />
+    </button>
+  );
+}
+
+/**
+ * 站点调度区：列出三站，每行 站点名 + 状态徽章 + 开关。
+ * 开→POST status:1；关→POST status:SITE_CLOSE_STATUS。请求中禁用全部开关防重复，
+ * 成功用返回 sites 就地刷新，失败 toast；卸载后不再 setState。
+ */
+function SiteScheduleSection({
+  sites,
+  onSitesChange,
+}: {
+  sites: SiteScheduleStatus[];
+  onSitesChange: (sites: SiteScheduleStatus[]) => void;
+}) {
+  const toast = useToast();
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  async function toggle(site: SiteScheduleStatus, on: boolean) {
+    if (busyId != null) return; // 一次只处理一个请求，防重复点击
+    const status = on ? 1 : SITE_CLOSE_STATUS;
+    setBusyId(site.site_id);
+    try {
+      const res = await apiFetch<{ sites: SiteScheduleStatus[] }>(
+        "/api/my/site-status",
+        {
+          method: "POST",
+          body: JSON.stringify({ siteId: site.site_id, status }),
+        }
+      );
+      if (!mounted.current) return;
+      onSitesChange(res.sites ?? []);
+      toast.success(`${site.site_name} 已${on ? "开启" : "关闭"}`);
+    } catch (err) {
+      if (!mounted.current) return;
+      toast.error(err instanceof Error ? err.message : "操作失败");
+    } finally {
+      if (mounted.current) setBusyId(null);
+    }
+  }
+
+  return (
+    <div>
+      <div className="mb-1 text-xs font-medium text-slate-500">站点调度</div>
+      <div className="divide-y divide-slate-100 overflow-hidden rounded-lg border border-slate-200">
+        {sites.map((s) => {
+          const on = s.status === 1;
+          const busy = busyId === s.site_id;
+          return (
+            <div
+              key={s.site_id}
+              className="flex items-center justify-between gap-3 px-3 py-2.5"
+            >
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium text-slate-700">
+                  {s.site_name}
+                </div>
+                <div className="mt-0.5 text-xs text-slate-400">
+                  站点 #{s.site_id}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {siteBadge(s.status)}
+                {busy && <Spinner className="h-4 w-4 text-slate-400" />}
+                <Toggle
+                  on={on}
+                  disabled={busyId != null}
+                  onChange={(next) => toggle(s, next)}
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 

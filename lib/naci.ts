@@ -534,6 +534,72 @@ export async function getChannelKeyStatus(id: number): Promise<{
   };
 }
 
+/**
+ * 一次 status-batch 只读同时拿到「每站调度状态」与「真实 key 统计」（不写平台）：
+ * POST status-batch {ids:[id]} → 用 parseStatusBatch 解析。
+ * - sites：data[id].sites[*] 的 {site_id, status}（1=已打开、3=未打开/自动禁用等）。
+ * - multiKeySize / aliveCount / deadCount：真实 key 存活统计（供「可用=platform-dead」实时展示）。
+ * - hasKeyInfo：是否至少读到一份 multi_key_status_list（false 时统计不可信）。
+ * 数据不可解析（data 空/无 sites）返回 null；naci 读失败会**抛出**（由调用方兜底）。
+ */
+export async function getChannelStatusFull(id: number): Promise<{
+  sites: { site_id: number; status: number }[];
+  multiKeySize: number;
+  aliveCount: number;
+  deadCount: number;
+  hasKeyInfo: boolean;
+} | null> {
+  const env = await naciFetch<Record<string, unknown>>(
+    "POST",
+    "/api/admin-hub/channels/status-batch",
+    { ids: [id] }
+  );
+  const parsed = parseStatusBatch(env.data, id);
+  if (!parsed) return null;
+  return {
+    sites: Array.from(parsed.siteStatus.entries()).map(([site_id, status]) => ({
+      site_id,
+      status,
+    })),
+    multiKeySize: parsed.multiKeySize,
+    aliveCount: parsed.aliveCount,
+    deadCount: parsed.deadCount,
+    hasKeyInfo: parsed.hasKeyInfo,
+  };
+}
+
+/**
+ * 只读读取渠道各站点的调度状态（不写平台）。基于 getChannelStatusFull，
+ * 读失败 / 无数据一律返回 []（调用方自行用 SITES 补全站名与缺省状态）。
+ */
+export async function getChannelSites(
+  id: number
+): Promise<{ site_id: number; status: number }[]> {
+  try {
+    const full = await getChannelStatusFull(id);
+    return full ? full.sites : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 设置渠道单个站点的调度状态：POST /api/admin-hub/channels/{id}/status
+ * body `{site_id, status, all_sites:false}`。status 透传（1=开、3/0/2 等由调用方决定）。
+ * naci 失败时抛出，由调用方兜底（不在此吞异常）。
+ */
+export async function setSiteStatus(
+  id: number,
+  siteId: number,
+  status: number
+): Promise<void> {
+  await naciFetch<unknown>("POST", `/api/admin-hub/channels/${id}/status`, {
+    site_id: siteId,
+    status,
+    all_sites: false,
+  });
+}
+
 /** 连通性测试：登录并校验 session（GET /api/user/self）。 */
 export async function ping(): Promise<{ userId?: number; username?: string }> {
   const env = await naciFetch<{ id?: number; username?: string }>(

@@ -5,6 +5,16 @@ import type { SiteAmount } from "@/lib/types";
 import { Badge } from "@/components/ui";
 
 /**
+ * 站点调度状态（GET /api/my/channel 的 channel.sites 元素）。
+ * status：1=开启 / 3=自动禁用 / 0=关闭 / 2=手动禁用 / null 或其他=未知。
+ */
+export interface SiteScheduleStatus {
+  site_id: number;
+  site_name: string;
+  status: number | null;
+}
+
+/**
  * 渠道状态对象 shape（GET /api/my/channel 与 GET /api/admin/users/[id]/channel
  * 的 data.channel 一致）。顶层 camelCase；siteAmounts 内部元素仍是 snake_case。
  */
@@ -37,6 +47,8 @@ export interface ChannelStatus {
   usedQuota?: number;
   usedAmount?: number;
   siteAmounts?: SiteAmount[];
+  /** 各站点调度状态（用户端可手动开/关） */
+  sites?: SiteScheduleStatus[];
 }
 
 function statusBadge(status?: number) {

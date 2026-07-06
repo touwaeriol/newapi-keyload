@@ -1,7 +1,9 @@
-// 定时补 key 引擎（按需补给）：每 60s 检查每个仍有 pending key 的渠道，
-// 仅当渠道「尚不存在」或「存活 key=0（自动禁用）」时，才从本地池取「配置的每批数量」个
-// key 批量 append 到对应 naci 渠道并启用全部三站；否则把 key 留在池里等下次真正缺 key 时再补。
-// 是否缺 key 用只读端点 status-batch 检测（getChannelKeyStatus，不写平台）。
+// 定时补 key 引擎（按需补给 + 缓存刷新）：每 60s 遍历「所有已解析出 channelId 的绑定渠道」
+// 与「所有仍有 pending key 的渠道」的并集，对每个渠道用只读端点 status-batch 检测一次
+// （assessRefillNeed：既把真实 multiKeySize/deadCount 写回用户缓存，让管理员列表 ≤60s 新鲜，
+// 又判断是否缺 key）。仅当该渠道「缺 key（不存在 / 存活 key=0 自动禁用）」**且有 pending key**
+// 时，才从本地池取「配置的每批数量」个 key 批量 append 并重开三站；否则只刷新缓存、不补，
+// 把 key 留在池里等下次真正缺 key 时再补。
 //
 // 单例守卫挂 globalThis，兼容 Next dev 热重载 / standalone 多次 import，避免重复启动定时器。
 // 引擎内任何异常都被捕获，绝不让 tick 抛出而中断定时器或 crash 进程。
@@ -11,6 +13,7 @@ import {
   channelsWithPending,
   clampBatchSize,
   getConfig,
+  getUsers,
   markPoolUploaded,
   nextPendingBatch,
 } from "./store";
@@ -69,9 +72,11 @@ async function safeLog(
 }
 
 /**
- * 单次调度（按需补给）：遍历所有有 pending key 的渠道，逐个（串行）先只读判定是否缺 key，
- * 仅在缺 key（渠道不存在 / 存活 key=0）时才取一批上传；有存活 key 则留池不动。
- * isRunning 防重入；单渠道失败 try/catch 隔离（key 保持 pending，下轮重试）。
+ * 单次调度（按需补给 + 缓存刷新）：遍历「已解析出 channelId 的绑定渠道」∪「有 pending 的渠道」，
+ * 逐个（串行）用 assessRefillNeed 只读检测一次 status-batch：
+ *   - 顺带把真实 key 统计写回用户缓存（让池已排空的渠道也保持新鲜，管理员列表 ≤60s 真实）；
+ *   - 判定是否缺 key。仅当「缺 key」**且该渠道有 pending** 时才取一批上传；否则只刷新缓存不补。
+ * isRunning 防重入；单渠道失败 try/catch 隔离（key 保持 pending，下轮重试）；naci 读失败保留缓存跳过。
  */
 export async function tick(): Promise<void> {
   const state = engineState();
@@ -83,21 +88,33 @@ export async function tick(): Promise<void> {
     if (!cfg.autoRefillEnabled) return; // 自动补 key 关闭
     const batchSize = clampBatchSize(cfg.uploadBatchSize);
 
-    const channels = await channelsWithPending();
-    for (const channelName of channels) {
+    // 目标渠道 = 已解析出 channelId 的绑定渠道（需刷新缓存）∪ 有 pending 的渠道（可能需补/首建）。
+    // 前者保证池已排空的渠道也每轮刷新真实统计；后者保证首次上传能创建、缺 key 能补。
+    const users = await getUsers();
+    const resolvedBound = users
+      .filter((u) => u.channelName.trim().length > 0 && u.channelId != null)
+      .map((u) => u.channelName.trim());
+    const pendingChannels = await channelsWithPending();
+    const pendingSet = new Set(pendingChannels);
+    const targets = Array.from(
+      new Set([...resolvedBound, ...pendingChannels])
+    );
+
+    for (const channelName of targets) {
       try {
-        // 只读判定：渠道是否需要补 key（不写平台）
+        // 一次只读 status-batch：assessRefillNeed 内部既刷新真实统计缓存，又判定是否缺 key
         const decision = await assessRefillNeed(channelName);
         if (decision.status === "unreadable") {
-          // 检测失败：本轮跳过，key 留 pending 下轮重试
+          // 读失败：保留上次缓存，本轮跳过（不补、不清缓存），key 留 pending 下轮重试
           await safeLog(
             "warn",
             channelName,
-            "只读检测渠道状态失败，本轮跳过（下轮重试）"
+            "只读检测渠道状态失败，本轮跳过（保留缓存，下轮重试）"
           );
           continue;
         }
-        if (!decision.needsKeys) continue; // 仍有存活 key，key 留在池里
+        // 仅「缺 key」且「有 pending」才补一批；没 pending 的渠道只刷新缓存、不补
+        if (!decision.needsKeys || !pendingSet.has(channelName)) continue;
 
         const batch = await nextPendingBatch(channelName, batchSize);
         if (batch.length === 0) continue;

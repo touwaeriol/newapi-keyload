@@ -9,10 +9,13 @@ import {
   findChannelByName,
   getChannel,
   getChannelKeyStatus,
+  getChannelSites,
+  getChannelStatusFull,
   reenableAllSites,
+  setSiteStatus,
   updateChannel,
 } from "./naci";
-import { parseKeys } from "./supplier";
+import { parseKeys, SITES } from "./supplier";
 import {
   addKeysToPool,
   addLog,
@@ -33,6 +36,29 @@ function engineNextCheckAt(): string | null {
   };
   const ts = g.__keyloadEngine?.nextTickAt ?? null;
   return ts ? new Date(ts).toISOString() : null;
+}
+
+/** 单站调度状态（供前端展示 / 手动开关）：status=null 表示平台未返回该站。 */
+export interface SiteSchedule {
+  site_id: number;
+  site_name: string;
+  /** 1=开启，3=自动禁用，0=关闭，2=手动禁用；null=平台未返回 */
+  status: number | null;
+}
+
+/**
+ * 以固定三站（supplier.SITES）为基准，套上平台返回的每站 status 生成展示用列表：
+ * 平台返回了该站 → 用其 status；平台没返回（或渠道未创建，传 []）→ status=null。
+ */
+function sitesWithNames(
+  statuses: { site_id: number; status: number }[]
+): SiteSchedule[] {
+  const statusMap = new Map(statuses.map((s) => [s.site_id, s.status]));
+  return SITES.map((s) => ({
+    site_id: s.site_id,
+    site_name: s.site_name,
+    status: statusMap.has(s.site_id) ? statusMap.get(s.site_id)! : null,
+  }));
 }
 
 /**
@@ -203,15 +229,16 @@ export interface RefillDecision {
 
 /**
  * 判定某渠道是否需要补给（只读，不写 naci key）：
- * 1. 解析渠道（复用绑定用户的 channelId 缓存）；不存在 → missing（needsKeys）。
- * 2. 渠道被手动禁用（channel.status===2）→ manual（不补；人工干预不覆盖）。
- * 3. 否则 getChannelKeyStatus 只读检测：
- *    - 读失败（null）→ unreadable（本轮跳过）。
+ * 1. 解析渠道（复用绑定用户的 channelId 缓存）；不存在 → missing（needsKeys）；回写 channelId。
+ * 2. getChannelKeyStatus 只读检测（对所有已存在渠道都读，含手动禁用的）：
+ *    - 读失败（null）→ unreadable（本轮跳过，保留旧缓存）。
+ * 3. 用读到的**真实** multiKeySize/deadCount 刷新用户表缓存
+ *    （platformKeyCount=multiKeySize、deadKeyCount=deadCount，无需 reenable），
+ *    保证「不补的那些轮」（含池已排空 / 手动禁用）前端也能看到真实「可用=platform-dead」（如 0/280）。
+ * 4. 判定（缓存已刷新后）：
+ *    - 手动禁用（channel.status===2）→ manual（不补；人工干预不覆盖）。
  *    - aliveCount===0 → exhausted（needsKeys，即「启用但 0 可用」的自动禁用态）。
  *    - 否则 alive（无需补）。
- * 4. 渠道存在时，顺带用读到的**真实** multiKeySize/deadCount 刷新用户表缓存
- *    （platformKeyCount=multiKeySize、deadKeyCount=deadCount，无需 reenable），
- *    保证「不补的那些轮」前端也能看到真实「可用=platform-dead」（如 0/280）；并回写 channelId。
  */
 export async function assessRefillNeed(
   channelName: string
@@ -235,23 +262,24 @@ export async function assessRefillNeed(
     });
   }
 
-  // 手动禁用（status===2）：人工干预，不自动补 key。
-  // 注：keys 全 status=3 时渠道 status 仍为 1（启用），那是「自动禁用」态，需补。
-  if (typeof existing.status === "number" && existing.status === 2) {
-    return { needsKeys: false, status: "manual", channelId: existing.id };
-  }
-
+  // 先只读检测真实 key 统计（对所有已存在渠道都读，含手动禁用的，保证缓存新鲜）。
   const stat = await getChannelKeyStatus(existing.id);
   if (!stat) {
     return { needsKeys: false, status: "unreadable", channelId: existing.id };
   }
 
-  // 用只读检测读到的真实统计刷新缓存（补与不补的轮次都刷新，让前端始终显示真实可用数）
+  // 用只读检测读到的真实统计刷新缓存（补与不补、含手动禁用的轮次都刷新，让前端始终显示真实可用数）
   if (user) {
     await updateUserKeyStats(user.id, {
       platformKeyCount: stat.multiKeySize,
       deadKeyCount: stat.deadCount,
     });
+  }
+
+  // 手动禁用（status===2）：人工干预，缓存已刷新但不自动补 key。
+  // 注：keys 全 status=3 时渠道 status 仍为 1（启用），那是「自动禁用」态，需补。
+  if (typeof existing.status === "number" && existing.status === 2) {
+    return { needsKeys: false, status: "manual", channelId: existing.id };
   }
 
   if (stat.aliveCount === 0) {
@@ -278,6 +306,7 @@ export async function resolveMyChannel(user: User) {
       uploadBatchSize,
       autoRefillEnabled,
       nextCheckAt,
+      sites: sitesWithNames([]),
     };
   }
 
@@ -306,10 +335,32 @@ export async function resolveMyChannel(user: User) {
       uploadBatchSize,
       autoRefillEnabled,
       nextCheckAt,
+      sites: sitesWithNames([]),
     };
   }
 
-  // 平台真实 key 统计：读上传时落库的缓存，GET 不触发有副作用的重开/额外拉取
+  // 一次 status-batch 只读同时拿「每站调度状态」+「真实 key 统计」（避免读两次）。
+  // 注：这给 GET /api/my/channel 增加一次 status-batch 调用（可接受）。读失败退回缓存、不 crash。
+  let realtime: Awaited<ReturnType<typeof getChannelStatusFull>> = null;
+  try {
+    realtime = await getChannelStatusFull(detail.id);
+  } catch {
+    realtime = null;
+  }
+
+  // 平台真实 key 统计：优先用实时 status-batch 读到的值（覆盖旧缓存）并写回缓存；
+  // 读失败 / 无 key 信息时退回 user 缓存。这样即使池已排空，「可用=platform-dead」也保持真实（全死=0）。
+  let platformKeyCount = user.platformKeyCount ?? undefined;
+  let deadKeyCount = user.deadKeyCount ?? undefined;
+  if (realtime && realtime.hasKeyInfo) {
+    platformKeyCount = realtime.multiKeySize;
+    deadKeyCount = realtime.deadCount;
+    await updateUserKeyStats(user.id, {
+      platformKeyCount: realtime.multiKeySize,
+      deadKeyCount: realtime.deadCount,
+    });
+  }
+
   return {
     exists: true as const,
     channelName,
@@ -328,7 +379,51 @@ export async function resolveMyChannel(user: User) {
     uploadBatchSize,
     autoRefillEnabled,
     nextCheckAt,
-    platformKeyCount: user.platformKeyCount ?? undefined,
-    deadKeyCount: user.deadKeyCount ?? undefined,
+    platformKeyCount,
+    deadKeyCount,
+    sites: sitesWithNames(realtime?.sites ?? []),
   };
+}
+
+/**
+ * 手动设置调用者绑定渠道某站点的调度状态（供 POST /api/my/site-status）：
+ * 解析调用者自己的渠道（复用 channelId 缓存）→ 渠道未创建返回 null（路由转 fail 文案）→
+ * setSiteStatus(channelId, siteId, status) 透传 status → 记 info 日志 →
+ * 重新只读 getChannelSites 返回更新后的三站状态。
+ * siteId / status 的合法性由路由校验（siteId∈SITES、status∈{0,1,2,3}）。
+ */
+export async function setMySiteStatus(
+  user: User,
+  siteId: number,
+  status: number
+): Promise<SiteSchedule[] | null> {
+  const name = user.channelName.trim();
+  if (!name) return null;
+
+  const detail = await resolveChannelByName(name, user.channelId);
+  if (!detail) return null;
+
+  // 顺带回写 channelId 缓存
+  if (user.channelId !== detail.id) {
+    await upsertUser({
+      ...user,
+      channelId: detail.id,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  await setSiteStatus(detail.id, siteId, status);
+
+  const siteName =
+    SITES.find((s) => s.site_id === siteId)?.site_name ?? String(siteId);
+  await addLog({
+    level: "info",
+    actor: user.username,
+    channelName: name,
+    channelId: detail.id,
+    message: `手动设置站点 ${siteName}(${siteId}) 调度状态为 ${status}`,
+  });
+
+  const siteStatuses = await getChannelSites(detail.id);
+  return sitesWithNames(siteStatuses);
 }
