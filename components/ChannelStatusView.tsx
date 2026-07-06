@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { SiteAmount } from "@/lib/types";
 import { Badge } from "@/components/ui";
 
@@ -25,6 +25,12 @@ export interface ChannelStatus {
   poolPending?: number;
   /** 本地队列中已上传的 key 数 */
   poolUploaded?: number;
+  /** 定时引擎每批上传数量（管理员配置） */
+  uploadBatchSize?: number;
+  /** 是否启用自动补 key */
+  autoRefillEnabled?: boolean;
+  /** 下一次定时检查时间（ISO 字符串） */
+  nextCheckAt?: string | null;
   models?: string;
   priority?: number;
   group?: string;
@@ -61,17 +67,22 @@ export function ChannelStatusView({ channel }: { channel: ChannelStatus | null }
 
   if (channel.exists === false) {
     return (
-      <div className="rounded-lg bg-amber-50 px-4 py-6 text-center">
-        <Badge tone="amber">尚未创建</Badge>
-        <p className="mt-2 text-sm text-slate-500">
-          该渠道还未在平台创建，首次上传 Key 后将自动创建。
-        </p>
+      <div className="space-y-4">
+        <UploadProgress channel={channel} />
+        <div className="rounded-lg bg-amber-50 px-4 py-6 text-center">
+          <Badge tone="amber">尚未创建</Badge>
+          <p className="mt-2 text-sm text-slate-500">
+            该渠道还未在平台创建，队列有 key 后由定时引擎自动创建并上传。
+          </p>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-4">
+      <UploadProgress channel={channel} />
+
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
         <Stat label="渠道 ID" value={`#${channel.channelId ?? "-"}`} />
         <Stat label="状态" value={statusBadge(channel.status)} />
@@ -187,4 +198,108 @@ function Stat({ label, value }: { label: string; value: ReactNode }) {
       <div className="mt-0.5 text-sm font-medium text-slate-800">{value}</div>
     </div>
   );
+}
+
+/** 上传进度：累计已上传 / 待上传 / 每批数量 / 进度条 / 下一次检查倒计时 / 预计批次。 */
+function UploadProgress({ channel }: { channel: ChannelStatus }) {
+  const uploaded = channel.poolUploaded ?? 0;
+  const pending = channel.poolPending ?? 0;
+  const total = uploaded + pending;
+  const pct = total > 0 ? Math.round((uploaded / total) * 100) : 0;
+  const batch = channel.uploadBatchSize ?? 0;
+  const remainingBatches = batch > 0 ? Math.ceil(pending / batch) : 0;
+  const auto = channel.autoRefillEnabled;
+
+  return (
+    <div className="rounded-xl border border-brand-100 bg-brand-50/50 p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <h4 className="text-sm font-semibold text-slate-800">上传进度</h4>
+        {auto === false ? (
+          <Badge tone="rose">自动补 key 已关闭</Badge>
+        ) : (
+          <Badge tone="green">自动补 key 运行中</Badge>
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <BigStat label="累计已上传" value={uploaded} />
+        <BigStat
+          label="待上传"
+          value={pending}
+          tone={pending > 0 ? "amber" : undefined}
+        />
+        <BigStat label="每批数量" value={batch || "-"} />
+        <BigStat
+          label="平台 Key 数"
+          value={channel.platformKeyCount ?? "-"}
+        />
+      </div>
+
+      {/* 进度条 */}
+      <div className="mt-3">
+        <div className="mb-1 flex justify-between text-xs text-slate-500">
+          <span>{`已上传 ${uploaded} / 共 ${total}`}</span>
+          <span>{pct}%</span>
+        </div>
+        <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
+          <div
+            className="h-full rounded-full bg-brand-500 transition-all"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      </div>
+
+      {/* 下一次检查 + 预计 */}
+      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
+        <span>
+          下一次检查：
+          <span className="font-medium text-slate-700">
+            <NextCheck at={channel.nextCheckAt} />
+          </span>
+        </span>
+        {pending > 0 && batch > 0 && (
+          <span>
+            待上传约 <b className="text-slate-700">{remainingBatches}</b> 批（每批约 1 分钟，≈{" "}
+            {remainingBatches} 分钟完成）
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function BigStat({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: ReactNode;
+  tone?: "amber";
+}) {
+  return (
+    <div className="rounded-lg bg-white/70 px-3 py-2">
+      <div className="text-xs text-slate-400">{label}</div>
+      <div
+        className={`mt-0.5 text-lg font-semibold ${
+          tone === "amber" ? "text-amber-600" : "text-slate-800"
+        }`}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+/** 下一次检查倒计时（每秒刷新）。 */
+function NextCheck({ at }: { at?: string | null }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  if (!at) return <>—</>;
+  const ms = new Date(at).getTime() - now;
+  const s = Math.max(0, Math.round(ms / 1000));
+  return <>{s > 0 ? `约 ${s} 秒后` : "即将检查"}</>;
 }

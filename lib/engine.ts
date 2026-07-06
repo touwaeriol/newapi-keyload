@@ -20,14 +20,38 @@ interface EngineState {
   started: boolean;
   isRunning: boolean;
   timer: ReturnType<typeof setInterval> | null;
+  lastTickAt: number | null; // 上次调度开始时间戳(ms)
+  nextTickAt: number | null; // 预计下次调度时间戳(ms)
 }
 
 function engineState(): EngineState {
   const g = globalThis as unknown as { __keyloadEngine?: EngineState };
   if (!g.__keyloadEngine) {
-    g.__keyloadEngine = { started: false, isRunning: false, timer: null };
+    g.__keyloadEngine = {
+      started: false,
+      isRunning: false,
+      timer: null,
+      lastTickAt: null,
+      nextTickAt: null,
+    };
   }
   return g.__keyloadEngine;
+}
+
+/** 引擎调度状态：供前端展示「下一次检查」等。 */
+export function getEngineStatus(): {
+  intervalMs: number;
+  lastTickAt: number | null;
+  nextTickAt: number | null;
+  running: boolean;
+} {
+  const s = engineState();
+  return {
+    intervalMs: TICK_INTERVAL_MS,
+    lastTickAt: s.lastTickAt,
+    nextTickAt: s.nextTickAt,
+    running: s.isRunning,
+  };
 }
 
 async function safeLog(
@@ -50,6 +74,7 @@ export async function tick(): Promise<void> {
   const state = engineState();
   if (state.isRunning) return; // 上一轮未结束，跳过
   state.isRunning = true;
+  state.lastTickAt = Date.now();
   try {
     const cfg = await getConfig();
     if (!cfg.autoRefillEnabled) return; // 自动补 key 关闭
@@ -79,6 +104,7 @@ export async function tick(): Promise<void> {
     console.error("[engine] tick 失败:", err);
   } finally {
     state.isRunning = false;
+    state.nextTickAt = Date.now() + TICK_INTERVAL_MS;
   }
 }
 
@@ -89,6 +115,7 @@ export function startEngine(): void {
   state.started = true;
 
   // 启动后先延迟一小段跑一次（等 DB/首次请求初始化），之后每分钟一次
+  state.nextTickAt = Date.now() + INITIAL_DELAY_MS;
   setTimeout(() => {
     void tick();
   }, INITIAL_DELAY_MS);

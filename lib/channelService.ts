@@ -15,6 +15,7 @@ import {
   addKeysToPool,
   addLog,
   findUserByChannelName,
+  getConfig,
   getUploadedKeyCount,
   poolCounts,
   recordUploadedKeys,
@@ -22,6 +23,15 @@ import {
   upsertUser,
 } from "./store";
 import type { EnqueueResult, KeyStats, NaciChannel, User } from "./types";
+
+/** 读定时引擎的下次调度时间（从 globalThis 读，避免与 engine.ts 循环依赖）。 */
+function engineNextCheckAt(): string | null {
+  const g = globalThis as unknown as {
+    __keyloadEngine?: { nextTickAt: number | null };
+  };
+  const ts = g.__keyloadEngine?.nextTickAt ?? null;
+  return ts ? new Date(ts).toISOString() : null;
+}
 
 /**
  * 按渠道名解析 naci 渠道：
@@ -173,6 +183,11 @@ export async function pushBatchToChannel(
 
 /** 供 GET /api/my/channel 用：解析并返回渠道详情 + 本地池进度，不写 key。 */
 export async function resolveMyChannel(user: User) {
+  const cfg = await getConfig();
+  const uploadBatchSize = cfg.uploadBatchSize;
+  const autoRefillEnabled = cfg.autoRefillEnabled;
+  const nextCheckAt = engineNextCheckAt();
+
   const channelName = user.channelName.trim();
   if (!channelName) {
     return {
@@ -181,6 +196,9 @@ export async function resolveMyChannel(user: User) {
       uploadedKeyCount: 0,
       poolPending: 0,
       poolUploaded: 0,
+      uploadBatchSize,
+      autoRefillEnabled,
+      nextCheckAt,
     };
   }
 
@@ -206,6 +224,9 @@ export async function resolveMyChannel(user: User) {
       uploadedKeyCount,
       poolPending,
       poolUploaded,
+      uploadBatchSize,
+      autoRefillEnabled,
+      nextCheckAt,
     };
   }
 
@@ -225,6 +246,9 @@ export async function resolveMyChannel(user: User) {
     uploadedKeyCount,
     poolPending,
     poolUploaded,
+    uploadBatchSize,
+    autoRefillEnabled,
+    nextCheckAt,
     platformKeyCount: user.platformKeyCount ?? undefined,
     deadKeyCount: user.deadKeyCount ?? undefined,
   };
