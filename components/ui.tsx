@@ -231,7 +231,13 @@ export function Modal({
       if (e.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // 打开时锁定 body 滚动，关闭/卸载时恢复原值
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
   }, [open, onClose]);
 
   if (!open) return null;
@@ -243,6 +249,8 @@ export function Modal({
         onClick={onClose}
       />
       <div
+        role="dialog"
+        aria-modal="true"
         className={`relative z-10 w-full ${width} rounded-xl border border-slate-200 bg-white shadow-xl`}
       >
         <header className="flex items-center justify-between border-b border-slate-100 px-5 py-4">

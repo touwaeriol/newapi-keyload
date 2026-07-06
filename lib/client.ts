@@ -39,6 +39,9 @@ interface ApiEnvelope<T> {
   data: T;
 }
 
+/** 全局未授权事件名：app/page.tsx 监听后清空当前用户、回到登录门 */
+export const UNAUTHORIZED_EVENT = "akl:unauthorized";
+
 /**
  * 统一请求封装。自动注入 x-access-key 与 JSON Content-Type；
  * success=false 时抛出 Error(message)，成功返回 data。
@@ -55,6 +58,22 @@ export async function apiFetch<T = unknown>(
   }
 
   const res = await fetch(path, { ...opts, headers });
+
+  // 401：访问密钥失效/未授权 —— 清除本地 key 并广播全局事件触发重登
+  if (res.status === 401) {
+    clearStoredKey();
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+    }
+    let message = "访问密钥无效或已失效";
+    try {
+      const j = (await res.json()) as Partial<ApiEnvelope<T>>;
+      if (j?.message) message = j.message;
+    } catch {
+      /* ignore body parse error */
+    }
+    throw new Error(message);
+  }
 
   let json: ApiEnvelope<T> | null = null;
   try {

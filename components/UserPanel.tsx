@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { SafeUser, UploadResult } from "@/lib/types";
 import { apiFetch } from "@/lib/client";
 import { useToast } from "@/components/Toast";
@@ -12,16 +12,25 @@ export function UserPanel({ user }: { user: SafeUser }) {
   const toast = useToast();
   const [channel, setChannel] = useState<ChannelStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const loadChannel = useCallback(async () => {
     setLoading(true);
     try {
       const data = await apiFetch<{ channel: ChannelStatus }>("/api/my/channel");
+      if (!mounted.current) return;
       setChannel(data.channel);
     } catch (err) {
+      if (!mounted.current) return;
       toast.error(err instanceof Error ? err.message : "读取渠道失败");
     } finally {
-      setLoading(false);
+      if (mounted.current) setLoading(false);
     }
   }, [toast]);
 

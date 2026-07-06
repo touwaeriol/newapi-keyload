@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import type { LogEntry, SafeUser, SystemConfig } from "@/lib/types";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { LogEntry, SafeUser } from "@/lib/types";
 import { apiFetch } from "@/lib/client";
 import { useToast } from "@/components/Toast";
 import {
@@ -44,29 +44,46 @@ export function AdminPanel() {
 
 /* ============ 系统配置卡 ============ */
 
+/** GET /api/admin/config 返回 shape（密码不回传明文，仅返回是否已设置） */
+interface ConfigResponse {
+  naciBaseUrl: string;
+  naciUsername: string;
+  hasNaciPassword: boolean;
+}
+
 function ConfigCard() {
   const toast = useToast();
-  const [config, setConfig] = useState<SystemConfig>({
-    naciBaseUrl: "",
-    naciToken: "",
-  });
+  const [baseUrl, setBaseUrl] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [hasPassword, setHasPassword] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [pinging, setPinging] = useState(false);
-  const [showToken, setShowToken] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [pingUser, setPingUser] = useState<string | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await apiFetch<SystemConfig>("/api/admin/config");
-      setConfig({
-        naciBaseUrl: data.naciBaseUrl ?? "",
-        naciToken: data.naciToken ?? "",
-      });
+      const data = await apiFetch<ConfigResponse>("/api/admin/config");
+      if (!mounted.current) return;
+      setBaseUrl(data.naciBaseUrl ?? "");
+      setUsername(data.naciUsername ?? "");
+      setHasPassword(Boolean(data.hasNaciPassword));
+      setPassword("");
     } catch (err) {
+      if (!mounted.current) return;
       toast.error(err instanceof Error ? err.message : "读取配置失败");
     } finally {
-      setLoading(false);
+      if (mounted.current) setLoading(false);
     }
   }, [toast]);
 
@@ -75,13 +92,25 @@ function ConfigCard() {
   }, [load]);
 
   async function save() {
+    const naciBaseUrl = baseUrl.trim();
+    if (!naciBaseUrl) {
+      toast.error("naciBaseUrl 不能为空");
+      return;
+    }
     setSaving(true);
     try {
+      // naciPassword 留空 = 保持原密码不变（后端约定）
       await apiFetch("/api/admin/config", {
         method: "PUT",
-        body: JSON.stringify(config),
+        body: JSON.stringify({
+          naciBaseUrl,
+          naciUsername: username.trim(),
+          naciPassword: password,
+        }),
       });
       toast.success("配置已保存");
+      setPassword("");
+      await load();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "保存失败");
     } finally {
@@ -91,9 +120,13 @@ function ConfigCard() {
 
   async function ping() {
     setPinging(true);
+    setPingUser(null);
     try {
-      await apiFetch("/api/ping");
-      toast.success("naci 连接正常");
+      const res = await apiFetch<{ userId: number; username: string }>(
+        "/api/ping"
+      );
+      setPingUser(res.username);
+      toast.success(`已登录 naci: ${res.username}`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "连接失败");
     } finally {
@@ -104,7 +137,7 @@ function ConfigCard() {
   return (
     <Card
       title="系统配置"
-      subtitle="naci 平台连接信息（token 仅管理员可见）"
+      subtitle="naci 账号密码（后端登录用，仅管理员可配）"
       actions={
         <>
           <Button variant="secondary" onClick={ping} loading={pinging}>
@@ -119,36 +152,51 @@ function ConfigCard() {
       {loading ? (
         <LoadingRow />
       ) : (
-        <div className="grid gap-4 md:grid-cols-2">
-          <Field label="naciBaseUrl">
-            <TextInput
-              value={config.naciBaseUrl}
-              onChange={(e) =>
-                setConfig((c) => ({ ...c, naciBaseUrl: e.target.value }))
-              }
-              placeholder="https://open.naci-tech.com"
-            />
-          </Field>
-          <Field label="naciToken">
-            <div className="flex gap-2">
+        <div className="space-y-4">
+          <div className="grid gap-4 md:grid-cols-2">
+            <Field label="naciBaseUrl">
               <TextInput
-                type={showToken ? "text" : "password"}
-                value={config.naciToken}
-                onChange={(e) =>
-                  setConfig((c) => ({ ...c, naciToken: e.target.value }))
-                }
-                placeholder="Bearer token"
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                placeholder="https://open.naci-tech.com"
+              />
+            </Field>
+            <Field label="登录用户名">
+              <TextInput
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="naci 登录用户名"
                 autoComplete="off"
               />
-              <Button
-                variant="secondary"
-                type="button"
-                onClick={() => setShowToken((v) => !v)}
-              >
-                {showToken ? "隐藏" : "显示"}
-              </Button>
-            </div>
-          </Field>
+            </Field>
+            <Field
+              label="登录密码"
+              hint={hasPassword ? "已设置（留空则不修改）" : "未设置"}
+            >
+              <div className="flex gap-2">
+                <TextInput
+                  type={showPassword ? "text" : "password"}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder={hasPassword ? "已设置（留空不改）" : "未设置"}
+                  autoComplete="new-password"
+                />
+                <Button
+                  variant="secondary"
+                  type="button"
+                  onClick={() => setShowPassword((v) => !v)}
+                >
+                  {showPassword ? "隐藏" : "显示"}
+                </Button>
+              </div>
+            </Field>
+          </div>
+
+          {pingUser && (
+            <p className="rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+              已登录 naci：<b>{pingUser}</b>
+            </p>
+          )}
         </div>
       )}
     </Card>
@@ -174,15 +222,25 @@ function UsersCard() {
   const [channelData, setChannelData] = useState<ChannelStatus | null>(null);
   const [channelLoading, setChannelLoading] = useState(false);
 
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const data = await apiFetch("/api/admin/users");
+      if (!mounted.current) return;
       setUsers(toArray<SafeUser>(data, "users"));
     } catch (err) {
+      if (!mounted.current) return;
       toast.error(err instanceof Error ? err.message : "读取用户失败");
     } finally {
-      setLoading(false);
+      if (mounted.current) setLoading(false);
     }
   }, [toast]);
 
@@ -370,16 +428,25 @@ function LogsCard() {
   const toast = useToast();
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const data = await apiFetch("/api/logs");
+      if (!mounted.current) return;
       setLogs(toArray<LogEntry>(data, "logs"));
     } catch (err) {
+      if (!mounted.current) return;
       toast.error(err instanceof Error ? err.message : "读取日志失败");
     } finally {
-      setLoading(false);
+      if (mounted.current) setLoading(false);
     }
   }, [toast]);
 

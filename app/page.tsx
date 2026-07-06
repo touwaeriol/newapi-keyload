@@ -2,7 +2,12 @@
 
 import { useEffect, useState } from "react";
 import type { SafeUser } from "@/lib/types";
-import { apiFetch, clearStoredKey, getStoredKey } from "@/lib/client";
+import {
+  apiFetch,
+  clearStoredKey,
+  getStoredKey,
+  UNAUTHORIZED_EVENT,
+} from "@/lib/client";
 import { ToastProvider } from "@/components/Toast";
 import { KeyGate } from "@/components/KeyGate";
 import { AdminPanel } from "@/components/AdminPanel";
@@ -38,6 +43,16 @@ export default function Page() {
     return () => {
       alive = false;
     };
+  }, []);
+
+  // 任意请求收到 401 → apiFetch 已清 key 并广播事件；这里回到登录门
+  useEffect(() => {
+    function onUnauthorized() {
+      setUser(null);
+      setPhase("gate");
+    }
+    window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
   }, []);
 
   function handleAuthed(u: SafeUser) {

@@ -4,7 +4,6 @@ import {
   createChannel,
   findChannelByName,
   getChannel,
-  getKeyStats,
   reenableAllSites,
   updateChannel,
 } from "./naci";
@@ -13,6 +12,7 @@ import {
   addLog,
   getUploadedKeyCount,
   recordUploadedKeys,
+  updateUserKeyStats,
   upsertUser,
 } from "./store";
 import type {
@@ -80,6 +80,11 @@ export async function uploadKeys(
   let keyStats: KeyStats | null = null;
   try {
     keyStats = await reenableAllSites(channelId);
+    // 落库缓存，供 GET /api/my/channel 复用（避免读接口触发有副作用的重开）
+    await updateUserKeyStats(user.id, {
+      platformKeyCount: keyStats.platformKeyCount,
+      deadKeyCount: keyStats.deadKeyCount,
+    });
   } catch (err) {
     // 重开失败不阻断上传主流程，记 warn 日志
     await addLog({
@@ -158,14 +163,7 @@ export async function resolveMyChannel(user: User) {
     return { exists: false as const, channelName, uploadedKeyCount };
   }
 
-  // 平台真实 key 统计：优先从详情解析，详情未带则不额外触发重开（读操作无副作用）
-  let keyStats: KeyStats | null = null;
-  try {
-    keyStats = await getKeyStats(detail.id);
-  } catch {
-    // 统计失败不影响渠道详情展示
-  }
-
+  // 平台真实 key 统计：读上传时落库的缓存，GET 不触发有副作用的重开/额外拉取
   return {
     exists: true as const,
     channelName,
@@ -179,7 +177,7 @@ export async function resolveMyChannel(user: User) {
     usedAmount: detail.used_amount,
     siteAmounts: detail.site_amounts,
     uploadedKeyCount,
-    platformKeyCount: keyStats?.platformKeyCount,
-    deadKeyCount: keyStats?.deadKeyCount,
+    platformKeyCount: user.platformKeyCount ?? undefined,
+    deadKeyCount: user.deadKeyCount ?? undefined,
   };
 }

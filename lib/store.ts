@@ -5,11 +5,11 @@ import crypto from "crypto";
 import { Pool } from "pg";
 import type { LogEntry, LogLevel, Role, SystemConfig, User } from "./types";
 
-// —— seed 默认值（敏感信息来自环境变量，代码内不留明文） ——
+// —— seed 默认值 ——
+// naci 平台地址允许用 env 兜底 seed；登录凭据不走环境变量，统一在数据库配置中手动管理。
 const DEFAULT_NACI_BASEURL = "https://open.naci-tech.com";
 const SEED_NACI_BASEURL = process.env.NACI_BASE_URL || DEFAULT_NACI_BASEURL;
 const SEED_NACI_TOKEN = "";
-// naci 登录凭据不从环境变量兜底，统一在数据库配置中手动管理
 const SEED_NACI_USERNAME = "";
 const SEED_NACI_PASSWORD = "";
 
@@ -57,6 +57,13 @@ async function createTables(pool: Pool): Promise<void> {
       updated_at timestamptz NOT NULL
     )
   `);
+  // 兼容已存在的线上库：新增平台 key 统计缓存字段（可空，旧数据默认 NULL）。
+  await pool.query(
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS platform_key_count integer`
+  );
+  await pool.query(
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS dead_key_count integer`
+  );
   await pool.query(`
     CREATE TABLE IF NOT EXISTS config (
       id int PRIMARY KEY DEFAULT 1,
@@ -165,6 +172,8 @@ interface UserRow {
   access_key: string;
   channel_name: string;
   channel_id: number | null;
+  platform_key_count: number | null;
+  dead_key_count: number | null;
   created_at: Date | string;
   updated_at: Date | string;
 }
@@ -181,6 +190,9 @@ function rowToUser(r: UserRow): User {
     accessKey: r.access_key,
     channelName: r.channel_name,
     channelId: r.channel_id === null ? null : Number(r.channel_id),
+    platformKeyCount:
+      r.platform_key_count == null ? null : Number(r.platform_key_count),
+    deadKeyCount: r.dead_key_count == null ? null : Number(r.dead_key_count),
     createdAt: toIso(r.created_at),
     updatedAt: toIso(r.updated_at),
   };
@@ -193,38 +205,6 @@ export async function getUsers(): Promise<User[]> {
     "SELECT * FROM users ORDER BY created_at ASC, username ASC"
   );
   return rows.map(rowToUser);
-}
-
-/** 整表替换：事务内清空后批量插入。 */
-export async function saveUsers(users: User[]): Promise<void> {
-  const pool = await ensureReady();
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    await client.query("DELETE FROM users");
-    for (const u of users) {
-      await client.query(
-        `INSERT INTO users (id, username, role, access_key, channel_name, channel_id, created_at, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-        [
-          u.id,
-          u.username,
-          u.role,
-          u.accessKey,
-          u.channelName,
-          u.channelId,
-          u.createdAt,
-          u.updatedAt,
-        ]
-      );
-    }
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
 }
 
 export async function findUserByKey(key: string): Promise<User | undefined> {
@@ -276,6 +256,18 @@ export async function upsertUser(user: User): Promise<void> {
 export async function deleteUser(id: string): Promise<void> {
   const pool = await ensureReady();
   await pool.query("DELETE FROM users WHERE id = $1", [id]);
+}
+
+/** 落库缓存该用户渠道的平台 key 统计（上传/重开站点后写入，供 GET 展示复用）。 */
+export async function updateUserKeyStats(
+  userId: string,
+  stats: { platformKeyCount?: number | null; deadKeyCount?: number | null }
+): Promise<void> {
+  const pool = await ensureReady();
+  await pool.query(
+    `UPDATE users SET platform_key_count = $2, dead_key_count = $3 WHERE id = $1`,
+    [userId, stats.platformKeyCount ?? null, stats.deadKeyCount ?? null]
+  );
 }
 
 // —— Config ——
@@ -390,13 +382,19 @@ export async function recordUploadedKeys(
   const name = channelName.trim();
   if (!name) return 0;
   const pool = await ensureReady();
-  for (const k of keys) {
-    const trimmed = k.trim();
-    if (!trimmed) continue;
+  // 批量单条 INSERT：本次去重后一次写入，减少数据库往返。
+  const hashes = Array.from(
+    new Set(keys.map((k) => k.trim()).filter(Boolean).map((k) => sha256(k)))
+  );
+  if (hashes.length > 0) {
+    const params: string[] = [name, ...hashes];
+    const valuesSql = hashes
+      .map((_, i) => `($1, $${i + 2})`)
+      .join(", ");
     await pool.query(
       `INSERT INTO uploaded_keys (channel_name, key_hash)
-       VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-      [name, sha256(trimmed)]
+       VALUES ${valuesSql} ON CONFLICT DO NOTHING`,
+      params
     );
   }
   return getUploadedKeyCount(name);

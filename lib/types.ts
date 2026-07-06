@@ -13,6 +13,10 @@ export interface User {
   channelName: string;
   /** 已解析并缓存的 naci 渠道 id；首次上传时按名称解析后写入 */
   channelId: number | null;
+  /** 平台上该渠道的真实 key 数缓存（上传/重开站点后落库，供 GET 展示复用） */
+  platformKeyCount?: number | null;
+  /** 平台上被禁用（status=3）的 key 数缓存 */
+  deadKeyCount?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -20,9 +24,9 @@ export interface User {
 /** 系统配置：naci 平台连接信息（后端持有，前端不下发凭据明文给普通用户） */
 export interface SystemConfig {
   naciBaseUrl: string;
-  /** admin-hub 登录用户名（后端用其登录拿 session）。运行时优先读环境变量 NACI_USERNAME */
+  /** admin-hub 登录用户名（后端用其登录拿 session），只从数据库配置读取 */
   naciUsername?: string;
-  /** admin-hub 登录密码。运行时优先读环境变量 NACI_PASSWORD；不建议入库明文 */
+  /** admin-hub 登录密码，只从数据库配置读取；不回传明文 */
   naciPassword?: string;
   /** 旧 new-api 兼容端点的 Bearer token（可选；转向 admin-hub 后保留兼容，非必填） */
   naciToken?: string;

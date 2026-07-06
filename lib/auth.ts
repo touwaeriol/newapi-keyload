@@ -55,8 +55,12 @@ export function errorResponse(err: unknown): NextResponse {
       { status: err.status }
     );
   }
-  const message = err instanceof Error ? err.message : "服务器内部错误";
-  return NextResponse.json({ success: false, message }, { status: 500 });
+  // 未预期错误：细节只记服务端日志，响应统一文案，避免泄露内部信息。
+  console.error("[api] 未处理错误:", err);
+  return NextResponse.json(
+    { success: false, message: "服务器内部错误" },
+    { status: 500 }
+  );
 }
 
 export function ok(data: unknown = {}) {

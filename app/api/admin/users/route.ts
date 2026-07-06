@@ -35,6 +35,10 @@ export async function POST(req: NextRequest) {
     if (users.some((u) => u.username === username)) {
       return fail("用户名已存在");
     }
+    // 渠道名全局唯一：不同用户绑同名渠道会跨用户共享/看到彼此日志
+    if (channelName && users.some((u) => u.channelName === channelName)) {
+      return fail("该渠道名已被其他用户绑定");
+    }
 
     const now = new Date().toISOString();
     const user: User = {

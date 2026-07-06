@@ -8,6 +8,12 @@ npm-debug.log*
 Dockerfile
 docker-compose.yml
 .dockerignore
+
+# 敏感：不要把 .env 打进任何镜像层（保留 .env.example）
+.env
+.env.*
+!.env.example
+
 README.md
 *.md
 docs

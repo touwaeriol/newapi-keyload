@@ -2,7 +2,7 @@
 //
 // 鉴权：POST /api/user/login {username,password} → Set-Cookie: session=...；
 // 之后所有请求携带 Cookie: session=...。session 失效（401 / "用户信息无效"）时自动
-// 重新登录并重试一次。账号密码只从环境变量读取（NACI_USERNAME / NACI_PASSWORD），
+// 重新登录并重试一次。账号密码只从数据库系统配置读取（不走环境变量），
 // 代码与文档不留明文。
 //
 // 渠道操作全部走 admin-hub：
@@ -27,26 +27,22 @@ interface NaciEnvelope<T> {
 }
 
 // —— session 单例（挂 globalThis，兼容 Next dev 热重载） ——
-// cookie/at 缓存已登录态；loginPromise 用于「单飞登录」：并发请求只触发一次
+// cookie 缓存已登录态；loginPromise 用于「单飞登录」：并发请求只触发一次
 // POST /api/user/login，其余请求 await 同一个 promise。
 interface SessionStore {
   cookie: string | null;
-  at: number; // 上次登录成功的时间戳（ms），用于惰性保活
   loginPromise: Promise<string> | null;
 }
-
-/** session 惰性保活阈值：距上次登录超过此时长即主动重登（无后台定时器） */
-const SESSION_MAX_AGE_MS = 20 * 60 * 1000;
 
 function sessionStore(): SessionStore {
   const g = globalThis as unknown as { __naciSession?: SessionStore };
   if (!g.__naciSession) {
-    g.__naciSession = { cookie: null, at: 0, loginPromise: null };
+    g.__naciSession = { cookie: null, loginPromise: null };
   }
   return g.__naciSession;
 }
 
-/** admin-hub 登录凭据：优先环境变量，其次配置表（不建议入库明文） */
+/** admin-hub 登录凭据：只从数据库系统配置读取（naciBaseUrl 允许 env 兜底，凭据不走 env） */
 async function getCredentials(): Promise<{
   baseUrl: string;
   username: string;
@@ -63,14 +59,12 @@ async function getCredentials(): Promise<{
   return { baseUrl, username, password };
 }
 
-/** 登录拿 session cookie，写入单例。 */
-async function login(): Promise<string> {
+/** 实际执行登录：拿 session cookie 并写入单例。 */
+async function doLogin(): Promise<string> {
   const { baseUrl, username, password } = await getCredentials();
   if (!baseUrl) throw new Error("尚未配置 naci 平台地址（naciBaseUrl）");
   if (!username || !password) {
-    throw new Error(
-      "缺少 naci 登录凭据（请设置环境变量 NACI_USERNAME / NACI_PASSWORD）"
-    );
+    throw new Error("缺少 naci 登录凭据（请在系统配置中设置 naci 账号密码）");
   }
 
   const res = await fetch(`${baseUrl}/api/user/login`, {
@@ -102,7 +96,21 @@ async function login(): Promise<string> {
   return cookie;
 }
 
-/** 确保有可用 session，没有则登录。 */
+/**
+ * 单飞登录：并发调用只触发一次 POST /api/user/login，其余复用同一个 in-flight promise，
+ * 避免多次登录互相覆盖 cookie。settle 后清空 loginPromise，允许下次重新登录。
+ */
+async function login(): Promise<string> {
+  const store = sessionStore();
+  if (store.loginPromise) return store.loginPromise;
+  const p = doLogin().finally(() => {
+    store.loginPromise = null;
+  });
+  store.loginPromise = p;
+  return p;
+}
+
+/** 确保有可用 session，没有则登录（复用单飞）。 */
 async function ensureSession(): Promise<string> {
   const store = sessionStore();
   if (store.cookie) return store.cookie;
@@ -115,8 +123,7 @@ function isAuthFailure(status: number, message: string): boolean {
   return (
     m.includes("用户信息无效") ||
     m.includes("未登录") ||
-    m.includes("无权") ||
-    m.includes("登录") ||
+    m.includes("登录已过期") ||
     m.toLowerCase().includes("unauthorized")
   );
 }

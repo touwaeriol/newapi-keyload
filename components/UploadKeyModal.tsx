@@ -131,6 +131,26 @@ export function UploadResultView({ result }: { result: UploadResult }) {
         <span className="text-slate-600">本次 {result.keyCount} 个 key</span>
         <span className="text-slate-400">·</span>
         <span className="text-slate-600">累计 {result.uploadedKeyCount} 个</span>
+        {result.platformKeyCount != null && (
+          <>
+            <span className="text-slate-400">·</span>
+            <span className="text-slate-600">
+              平台 {result.platformKeyCount} 个
+            </span>
+          </>
+        )}
+        {result.deadKeyCount != null && (
+          <>
+            <span className="text-slate-400">·</span>
+            <span
+              className={
+                result.deadKeyCount > 0 ? "text-rose-600" : "text-slate-600"
+              }
+            >
+              禁用 {result.deadKeyCount} 个
+            </span>
+          </>
+        )}
       </div>
 
       <div>

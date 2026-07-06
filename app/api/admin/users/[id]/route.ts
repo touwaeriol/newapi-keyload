@@ -51,6 +51,13 @@ export async function PUT(
 
     if (typeof body.channelName === "string") {
       const nextName = body.channelName.trim();
+      // 渠道名全局唯一：不同用户绑同名渠道会跨用户共享/看到彼此日志
+      if (nextName && nextName !== target.channelName) {
+        const users = await getUsers();
+        if (users.some((u) => u.channelName === nextName && u.id !== target.id)) {
+          return fail("该渠道名已被其他用户绑定");
+        }
+      }
       // 渠道名变化时清空已缓存的 channelId，避免指向旧渠道
       if (nextName !== target.channelName) {
         target.channelName = nextName;

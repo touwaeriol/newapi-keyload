@@ -1,4 +1,6 @@
-# 调用文档 — new-api 兼容渠道管理接口
+> ⚠️ **已废弃 / 历史资料**：本文档描述 naci 的 new-api 兼容端点（`Authorization: Bearer` + `/api/channel/`）。本系统**已不再使用**该路径，改用 **session 登录 + admin-hub 端点**（见 [`DESIGN.md`](DESIGN.md) §3）。仅供参考，勿据此实现当前系统。
+
+# 调用文档 — new-api 兼容渠道管理接口（已废弃）
 
 > 接口兼容 new-api 渠道管理格式，替换 Base URL 和访问令牌即可调用。
 

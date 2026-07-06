@@ -4,6 +4,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -55,12 +56,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     [remove]
   );
 
-  const api: ToastApi = {
-    push,
-    success: (m) => push(m, "success"),
-    error: (m) => push(m, "error"),
-    info: (m) => push(m, "info"),
-  };
+  const success = useCallback((m: string) => push(m, "success"), [push]);
+  const error = useCallback((m: string) => push(m, "error"), [push]);
+  const info = useCallback((m: string) => push(m, "info"), [push]);
+
+  const api = useMemo<ToastApi>(
+    () => ({ push, success, error, info }),
+    [push, success, error, info]
+  );
 
   return (
     <ToastCtx.Provider value={api}>

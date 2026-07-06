@@ -1,4 +1,6 @@
-# 架构说明
+> ⚠️ **已废弃 / 历史资料**：本文描述的是 v1 方案（session cookie 手动复制 + 定时引擎 `lib/engine.ts`/`lib/taskFactory.ts`/`app/api/tasks/*` + 本地 JSON 存储），这些文件与做法**均已删除**。当前实现是 **PostgreSQL + naci 账号密码登录(session) + admin-hub + 凭据入库**，以 [`DESIGN.md`](DESIGN.md) 为准。本文仅作历史参考，勿据其实现。
+
+# 架构说明（v1，已废弃）
 
 本文档说明「供应商渠道自动上 Key 系统」的整体架构、数据流、定时引擎工作流程、鉴权模型，以及为何选用平台 admin-hub 接口而非 new-api 兼容端点。
 

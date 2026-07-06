@@ -2,7 +2,7 @@
   "name": "newapi-keyload",
   "version": "2.0.0",
   "private": true,
-  "description": "供应商 Claude Key 自动上渠道系统（Next.js 本地全栈，new-api 兼容端点）",
+  "description": "供应商 Claude Key 自动上渠道系统（Next.js + PostgreSQL，naci admin-hub session 鉴权）",
   "scripts": {
     "dev": "next dev",
     "build": "next build",

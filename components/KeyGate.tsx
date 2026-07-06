@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { SafeUser } from "@/lib/types";
-import { apiFetch, setStoredKey } from "@/lib/client";
+import { apiFetch, clearStoredKey, setStoredKey } from "@/lib/client";
 import { Button, Field, TextInput } from "@/components/ui";
 
 /**
@@ -29,10 +29,10 @@ export function KeyGate({ onAuthed }: { onAuthed: (user: SafeUser) => void }) {
     try {
       const { user } = await apiFetch<{ user: SafeUser }>("/api/me");
       onAuthed(user);
-    } catch {
-      // 校验失败：清掉刚写入的无效 key
-      setStoredKey("", false);
-      setError("密钥无效");
+    } catch (err) {
+      // 校验失败：清掉刚写入的无效 key（401 时 apiFetch 也已清一次）
+      clearStoredKey();
+      setError(err instanceof Error ? err.message : "登录失败");
     } finally {
       setLoading(false);
     }

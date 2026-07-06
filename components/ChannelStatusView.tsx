@@ -17,6 +17,10 @@ export interface ChannelStatus {
   type?: number;
   /** 本系统累计上传去重 key 数 */
   uploadedKeyCount?: number;
+  /** 平台上该渠道的真实 key 数（multi_key_size） */
+  platformKeyCount?: number | null;
+  /** 被禁用（status=3）的 key 数 */
+  deadKeyCount?: number | null;
   models?: string;
   priority?: number;
   group?: string;
@@ -71,6 +75,28 @@ export function ChannelStatusView({ channel }: { channel: ChannelStatus | null }
         <Stat label="分组" value={channel.group ?? "-"} />
         <Stat label="优先级" value={channel.priority ?? "-"} />
         <Stat label="已上传 Key 数" value={channel.uploadedKeyCount ?? 0} />
+        <Stat
+          label="平台 Key 数"
+          value={
+            channel.platformKeyCount == null ? "-" : channel.platformKeyCount
+          }
+        />
+        <Stat
+          label="禁用 Key 数"
+          value={
+            channel.deadKeyCount == null ? (
+              "-"
+            ) : (
+              <span
+                className={
+                  channel.deadKeyCount > 0 ? "text-rose-600" : undefined
+                }
+              >
+                {channel.deadKeyCount}
+              </span>
+            )
+          }
+        />
       </div>
 
       <div className="grid grid-cols-2 gap-3">
