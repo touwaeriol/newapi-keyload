@@ -49,7 +49,13 @@ interface ConfigResponse {
   naciBaseUrl: string;
   naciUsername: string;
   hasNaciPassword: boolean;
+  /** 每批上传数量（定时引擎每分钟从队列取的批量大小） */
+  uploadBatchSize: number;
+  /** 是否启用自动补 key（每分钟从本地队列批量上传） */
+  autoRefillEnabled: boolean;
 }
+
+const DEFAULT_BATCH_SIZE = 20;
 
 function ConfigCard() {
   const toast = useToast();
@@ -57,6 +63,8 @@ function ConfigCard() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [hasPassword, setHasPassword] = useState(false);
+  const [batchSize, setBatchSize] = useState<number>(DEFAULT_BATCH_SIZE);
+  const [autoRefill, setAutoRefill] = useState(true);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [pinging, setPinging] = useState(false);
@@ -78,6 +86,12 @@ function ConfigCard() {
       setBaseUrl(data.naciBaseUrl ?? "");
       setUsername(data.naciUsername ?? "");
       setHasPassword(Boolean(data.hasNaciPassword));
+      setBatchSize(
+        typeof data.uploadBatchSize === "number" && data.uploadBatchSize > 0
+          ? data.uploadBatchSize
+          : DEFAULT_BATCH_SIZE
+      );
+      setAutoRefill(Boolean(data.autoRefillEnabled));
       setPassword("");
     } catch (err) {
       if (!mounted.current) return;
@@ -97,6 +111,11 @@ function ConfigCard() {
       toast.error("naciBaseUrl 不能为空");
       return;
     }
+    // 每批数量夹到 1~1000
+    const safeBatch = Math.min(
+      1000,
+      Math.max(1, Math.round(Number(batchSize) || DEFAULT_BATCH_SIZE))
+    );
     setSaving(true);
     try {
       // naciPassword 留空 = 保持原密码不变（后端约定）
@@ -106,6 +125,8 @@ function ConfigCard() {
           naciBaseUrl,
           naciUsername: username.trim(),
           naciPassword: password,
+          uploadBatchSize: safeBatch,
+          autoRefillEnabled: autoRefill,
         }),
       });
       toast.success("配置已保存");
@@ -189,6 +210,33 @@ function ConfigCard() {
                   {showPassword ? "隐藏" : "显示"}
                 </Button>
               </div>
+            </Field>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <Field
+              label="每批上传数量"
+              hint="后端每分钟从本地队列批量上传，每批 N 个，上传后自动启用三站"
+            >
+              <TextInput
+                type="number"
+                min={1}
+                max={1000}
+                value={Number.isNaN(batchSize) ? "" : batchSize}
+                onChange={(e) => setBatchSize(e.target.valueAsNumber)}
+                placeholder={String(DEFAULT_BATCH_SIZE)}
+              />
+            </Field>
+            <Field label="自动补 key" hint="关闭后队列不再自动上传，仅入池">
+              <label className="flex cursor-pointer items-center gap-2 py-2 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={autoRefill}
+                  onChange={(e) => setAutoRefill(e.target.checked)}
+                  className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-400"
+                />
+                {autoRefill ? "已开启" : "已关闭"}
+              </label>
             </Field>
           </div>
 

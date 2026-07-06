@@ -12,6 +12,17 @@ const SEED_NACI_BASEURL = process.env.NACI_BASE_URL || DEFAULT_NACI_BASEURL;
 const SEED_NACI_TOKEN = "";
 const SEED_NACI_USERNAME = "";
 const SEED_NACI_PASSWORD = "";
+// 定时补 key 引擎默认参数（可在系统配置中调整）
+const SEED_UPLOAD_BATCH_SIZE = 20;
+const SEED_AUTO_REFILL_ENABLED = true;
+
+/** 每批上传数量合法区间钳制（1~1000） */
+export function clampBatchSize(n: unknown): number {
+  const v = Math.floor(Number(n));
+  if (!Number.isFinite(v) || v < 1) return SEED_UPLOAD_BATCH_SIZE;
+  if (v > 1000) return 1000;
+  return v;
+}
 
 export function genId(): string {
   return crypto.randomBytes(8).toString("hex");
@@ -78,6 +89,13 @@ async function createTables(pool: Pool): Promise<void> {
   await pool.query(
     `ALTER TABLE config ADD COLUMN IF NOT EXISTS naci_password text NOT NULL DEFAULT ''`
   );
+  // 兼容已存在的线上库：新增定时补 key 引擎配置（带默认值，不破坏旧数据）。
+  await pool.query(
+    `ALTER TABLE config ADD COLUMN IF NOT EXISTS upload_batch_size int NOT NULL DEFAULT 20`
+  );
+  await pool.query(
+    `ALTER TABLE config ADD COLUMN IF NOT EXISTS auto_refill_enabled boolean NOT NULL DEFAULT true`
+  );
   await pool.query(`
     CREATE TABLE IF NOT EXISTS logs (
       id text PRIMARY KEY,
@@ -96,6 +114,21 @@ async function createTables(pool: Pool): Promise<void> {
       PRIMARY KEY (channel_name, key_hash)
     )
   `);
+  // 本地 key 池：上传的 key 先落这里（明文，供定时引擎取回补 key），逐批 append 到 naci。
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS key_pool (
+      id bigserial PRIMARY KEY,
+      channel_name text NOT NULL,
+      key text NOT NULL,
+      status text NOT NULL DEFAULT 'pending',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      uploaded_at timestamptz,
+      UNIQUE(channel_name, key)
+    )
+  `);
+  await pool.query(
+    `CREATE INDEX IF NOT EXISTS idx_key_pool_pending ON key_pool(channel_name, status)`
+  );
 }
 
 async function seed(pool: Pool): Promise<void> {
@@ -226,6 +259,20 @@ export async function findUserById(id: string): Promise<User | undefined> {
   return rows[0] ? rowToUser(rows[0]) : undefined;
 }
 
+/** 按绑定渠道名找用户（渠道名全局唯一，用于引擎回写渠道 id / key 统计缓存）。 */
+export async function findUserByChannelName(
+  channelName: string
+): Promise<User | undefined> {
+  const name = channelName.trim();
+  if (!name) return undefined;
+  const pool = await ensureReady();
+  const { rows } = await pool.query<UserRow>(
+    "SELECT * FROM users WHERE channel_name = $1 LIMIT 1",
+    [name]
+  );
+  return rows[0] ? rowToUser(rows[0]) : undefined;
+}
+
 /** 按 id upsert：冲突则整行更新。 */
 export async function upsertUser(user: User): Promise<void> {
   const pool = await ensureReady();
@@ -278,8 +325,10 @@ export async function getConfig(): Promise<SystemConfig> {
     naci_token: string;
     naci_username: string;
     naci_password: string;
+    upload_batch_size: number;
+    auto_refill_enabled: boolean;
   }>(
-    "SELECT naci_base_url, naci_token, naci_username, naci_password FROM config WHERE id = 1"
+    "SELECT naci_base_url, naci_token, naci_username, naci_password, upload_batch_size, auto_refill_enabled FROM config WHERE id = 1"
   );
   if (!rows[0]) {
     return {
@@ -287,6 +336,8 @@ export async function getConfig(): Promise<SystemConfig> {
       naciToken: SEED_NACI_TOKEN,
       naciUsername: SEED_NACI_USERNAME,
       naciPassword: SEED_NACI_PASSWORD,
+      uploadBatchSize: SEED_UPLOAD_BATCH_SIZE,
+      autoRefillEnabled: SEED_AUTO_REFILL_ENABLED,
     };
   }
   return {
@@ -294,24 +345,30 @@ export async function getConfig(): Promise<SystemConfig> {
     naciToken: rows[0].naci_token,
     naciUsername: rows[0].naci_username,
     naciPassword: rows[0].naci_password,
+    uploadBatchSize: clampBatchSize(rows[0].upload_batch_size),
+    autoRefillEnabled: Boolean(rows[0].auto_refill_enabled),
   };
 }
 
 export async function saveConfig(cfg: SystemConfig): Promise<void> {
   const pool = await ensureReady();
   await pool.query(
-    `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password)
-     VALUES (1, $1, $2, $3, $4)
+    `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password, upload_batch_size, auto_refill_enabled)
+     VALUES (1, $1, $2, $3, $4, $5, $6)
      ON CONFLICT (id) DO UPDATE SET
        naci_base_url = EXCLUDED.naci_base_url,
        naci_token = EXCLUDED.naci_token,
        naci_username = EXCLUDED.naci_username,
-       naci_password = EXCLUDED.naci_password`,
+       naci_password = EXCLUDED.naci_password,
+       upload_batch_size = EXCLUDED.upload_batch_size,
+       auto_refill_enabled = EXCLUDED.auto_refill_enabled`,
     [
       cfg.naciBaseUrl,
       cfg.naciToken ?? "",
       cfg.naciUsername ?? "",
       cfg.naciPassword ?? "",
+      clampBatchSize(cfg.uploadBatchSize),
+      cfg.autoRefillEnabled ?? SEED_AUTO_REFILL_ENABLED,
     ]
   );
 }
@@ -409,4 +466,95 @@ export async function getUploadedKeyCount(channelName: string): Promise<number> 
     [name]
   );
   return Number(rows[0]?.count ?? 0);
+}
+
+// —— 本地 key 池（明文，供定时引擎逐批取回补 key） ——
+
+export interface PoolCounts {
+  pending: number;
+  uploaded: number;
+}
+
+/** 该渠道池内 pending / uploaded 计数。 */
+export async function poolCounts(channelName: string): Promise<PoolCounts> {
+  const name = channelName.trim();
+  if (!name) return { pending: 0, uploaded: 0 };
+  const pool = await ensureReady();
+  const { rows } = await pool.query<{ status: string; count: string }>(
+    `SELECT status, count(*)::int AS count FROM key_pool
+     WHERE channel_name = $1 GROUP BY status`,
+    [name]
+  );
+  const counts: PoolCounts = { pending: 0, uploaded: 0 };
+  for (const r of rows) {
+    if (r.status === "pending") counts.pending = Number(r.count);
+    else if (r.status === "uploaded") counts.uploaded = Number(r.count);
+  }
+  return counts;
+}
+
+/**
+ * 把 key 批量入池（多值 INSERT ... ON CONFLICT DO NOTHING 去重）。
+ * 返回本次新增数与该渠道当前 pending/uploaded 计数。
+ */
+export async function addKeysToPool(
+  channelName: string,
+  keys: string[]
+): Promise<{ added: number } & PoolCounts> {
+  const name = channelName.trim();
+  if (!name) return { added: 0, pending: 0, uploaded: 0 };
+  const pool = await ensureReady();
+  const clean = Array.from(new Set(keys.map((k) => k.trim()).filter(Boolean)));
+  let added = 0;
+  if (clean.length > 0) {
+    const params: string[] = [name, ...clean];
+    const valuesSql = clean.map((_, i) => `($1, $${i + 2})`).join(", ");
+    const res = await pool.query(
+      `INSERT INTO key_pool (channel_name, key)
+       VALUES ${valuesSql}
+       ON CONFLICT (channel_name, key) DO NOTHING`,
+      params
+    );
+    added = res.rowCount ?? 0;
+  }
+  const counts = await poolCounts(name);
+  return { added, ...counts };
+}
+
+/** 取该渠道下一批待上传的 key（status='pending'，按 id 升序 LIMIT n）。 */
+export async function nextPendingBatch(
+  channelName: string,
+  n: number
+): Promise<{ id: string; key: string }[]> {
+  const name = channelName.trim();
+  if (!name || n <= 0) return [];
+  const pool = await ensureReady();
+  const { rows } = await pool.query<{ id: string; key: string }>(
+    `SELECT id, key FROM key_pool
+     WHERE channel_name = $1 AND status = 'pending'
+     ORDER BY id ASC LIMIT $2`,
+    [name, n]
+  );
+  // bigserial 经 pg 返回字符串，统一转为 string 避免精度问题。
+  return rows.map((r) => ({ id: String(r.id), key: r.key }));
+}
+
+/** 标记一批池内 key 为已上传。 */
+export async function markPoolUploaded(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const pool = await ensureReady();
+  await pool.query(
+    `UPDATE key_pool SET status = 'uploaded', uploaded_at = now()
+     WHERE id = ANY($1::bigint[])`,
+    [ids]
+  );
+}
+
+/** 所有仍有 pending key 的渠道名（去重）。 */
+export async function channelsWithPending(): Promise<string[]> {
+  const pool = await ensureReady();
+  const { rows } = await pool.query<{ channel_name: string }>(
+    `SELECT DISTINCT channel_name FROM key_pool WHERE status = 'pending'`
+  );
+  return rows.map((r) => r.channel_name);
 }

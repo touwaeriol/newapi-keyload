@@ -16,6 +16,8 @@ export async function GET(req: NextRequest) {
       naciUsername: cfg.naciUsername,
       hasNaciPassword: Boolean(cfg.naciPassword),
       hasNaciToken: Boolean(cfg.naciToken),
+      uploadBatchSize: cfg.uploadBatchSize,
+      autoRefillEnabled: cfg.autoRefillEnabled,
     });
   } catch (err) {
     return errorResponse(err);
@@ -32,6 +34,8 @@ export async function PUT(req: NextRequest) {
       naciUsername?: string;
       naciPassword?: string;
       naciToken?: string;
+      uploadBatchSize?: number;
+      autoRefillEnabled?: boolean;
     };
     const naciBaseUrl = (body.naciBaseUrl ?? "").trim();
     if (!naciBaseUrl) return fail("naciBaseUrl 不能为空");
@@ -46,13 +50,33 @@ export async function PUT(req: NextRequest) {
       body.naciToken && body.naciToken.trim().length > 0
         ? body.naciToken.trim()
         : current.naciToken ?? "";
+    // 未传则保留原值；batch 由 store.saveConfig 内部钳制到 1~1000
+    const uploadBatchSize =
+      body.uploadBatchSize == null
+        ? current.uploadBatchSize
+        : body.uploadBatchSize;
+    const autoRefillEnabled =
+      typeof body.autoRefillEnabled === "boolean"
+        ? body.autoRefillEnabled
+        : current.autoRefillEnabled;
 
-    await saveConfig({ naciBaseUrl, naciUsername, naciPassword, naciToken });
+    await saveConfig({
+      naciBaseUrl,
+      naciUsername,
+      naciPassword,
+      naciToken,
+      uploadBatchSize,
+      autoRefillEnabled,
+    });
+    // 回读钳制后的最终值返回
+    const saved = await getConfig();
     return ok({
       naciBaseUrl,
       naciUsername,
       hasNaciPassword: Boolean(naciPassword),
       hasNaciToken: Boolean(naciToken),
+      uploadBatchSize: saved.uploadBatchSize,
+      autoRefillEnabled: saved.autoRefillEnabled,
     });
   } catch (err) {
     return errorResponse(err);

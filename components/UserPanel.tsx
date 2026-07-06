@@ -1,12 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { SafeUser, UploadResult } from "@/lib/types";
+import type { SafeUser } from "@/lib/types";
 import { apiFetch } from "@/lib/client";
 import { useToast } from "@/components/Toast";
 import { Button, Card, Spinner } from "@/components/ui";
-import { UploadResultView } from "@/components/UploadKeyModal";
+import {
+  UploadResultView,
+  type UploadQueueResult,
+} from "@/components/UploadKeyModal";
 import { ChannelStatusView, type ChannelStatus } from "@/components/ChannelStatusView";
+
+/** 队列未清空时的轮询间隔（毫秒） */
+const POLL_INTERVAL = 15000;
 
 export function UserPanel({ user }: { user: SafeUser }) {
   const toast = useToast();
@@ -20,23 +26,41 @@ export function UserPanel({ user }: { user: SafeUser }) {
     };
   }, []);
 
-  const loadChannel = useCallback(async () => {
-    setLoading(true);
-    try {
-      const data = await apiFetch<{ channel: ChannelStatus }>("/api/my/channel");
-      if (!mounted.current) return;
-      setChannel(data.channel);
-    } catch (err) {
-      if (!mounted.current) return;
-      toast.error(err instanceof Error ? err.message : "读取渠道失败");
-    } finally {
-      if (mounted.current) setLoading(false);
-    }
-  }, [toast]);
+  // silent=true 用于后台轮询：不切换整卡 loading，也不弹错误 toast
+  const fetchChannel = useCallback(
+    async (silent = false) => {
+      if (!silent) setLoading(true);
+      try {
+        const data = await apiFetch<{ channel: ChannelStatus }>(
+          "/api/my/channel"
+        );
+        if (!mounted.current) return;
+        setChannel(data.channel);
+      } catch (err) {
+        if (!mounted.current) return;
+        if (!silent) {
+          toast.error(err instanceof Error ? err.message : "读取渠道失败");
+        }
+      } finally {
+        if (mounted.current && !silent) setLoading(false);
+      }
+    },
+    [toast]
+  );
 
   useEffect(() => {
-    loadChannel();
-  }, [loadChannel]);
+    fetchChannel(false);
+  }, [fetchChannel]);
+
+  // 队列仍有待上传 key 时，每 ~15s 静默轮询刷新进度；pending=0 或卸载即停
+  const poolPending = channel?.poolPending ?? 0;
+  useEffect(() => {
+    if (poolPending <= 0) return;
+    const timer = window.setInterval(() => {
+      fetchChannel(true);
+    }, POLL_INTERVAL);
+    return () => window.clearInterval(timer);
+  }, [poolPending, fetchChannel]);
 
   return (
     <div className="grid gap-6 lg:grid-cols-2">
@@ -44,9 +68,9 @@ export function UserPanel({ user }: { user: SafeUser }) {
         user={user}
         channel={channel}
         loading={loading}
-        onRefresh={loadChannel}
+        onRefresh={() => fetchChannel(false)}
       />
-      <UploadCard onUploaded={loadChannel} />
+      <UploadCard onUploaded={() => fetchChannel(false)} />
     </div>
   );
 }
@@ -91,7 +115,7 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
   const toast = useToast();
   const [text, setText] = useState("");
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<UploadResult | null>(null);
+  const [result, setResult] = useState<UploadQueueResult | null>(null);
 
   const lineCount = text
     .split("\n")
@@ -106,14 +130,14 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
     }
     setLoading(true);
     try {
-      const res = await apiFetch<UploadResult>("/api/my/upload", {
+      const res = await apiFetch<UploadQueueResult>("/api/my/upload", {
         method: "POST",
         body: JSON.stringify({ keys }),
       });
       setResult(res);
       setText("");
       toast.success(
-        `${res.action === "created" ? "已创建渠道" : "已追加"} · 本次 ${res.keyCount} 个 key`
+        `已加入队列：新增 ${res.added} 个，待上传 ${res.poolPending}，已上传 ${res.poolUploaded}`
       );
       onUploaded();
     } catch (err) {
@@ -124,7 +148,10 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
   }
 
   return (
-    <Card title="上传 Key" subtitle="每行一个 key，提交后自动创建/追加到渠道">
+    <Card
+      title="上传 Key"
+      subtitle="每行一个 key，提交后入本地队列，由定时引擎按每批数量批量上传"
+    >
       <div className="space-y-3">
         <textarea
           value={text}

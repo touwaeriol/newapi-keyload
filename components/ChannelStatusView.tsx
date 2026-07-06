@@ -21,6 +21,10 @@ export interface ChannelStatus {
   platformKeyCount?: number | null;
   /** 被禁用（status=3）的 key 数 */
   deadKeyCount?: number | null;
+  /** 本地队列中待上传的 key 数 */
+  poolPending?: number;
+  /** 本地队列中已上传的 key 数 */
+  poolUploaded?: number;
   models?: string;
   priority?: number;
   group?: string;
@@ -96,6 +100,26 @@ export function ChannelStatusView({ channel }: { channel: ChannelStatus | null }
               </span>
             )
           }
+        />
+        <Stat
+          label="待上传(队列)"
+          value={
+            channel.poolPending == null ? (
+              "-"
+            ) : (
+              <span
+                className={
+                  channel.poolPending > 0 ? "text-amber-600" : undefined
+                }
+              >
+                {channel.poolPending}
+              </span>
+            )
+          }
+        />
+        <Stat
+          label="已上传(队列)"
+          value={channel.poolUploaded == null ? "-" : channel.poolUploaded}
         />
       </div>
 

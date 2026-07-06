@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { errorResponse, fail, ok, requireUser } from "@/lib/auth";
 import { parseKeys } from "@/lib/supplier";
-import { uploadKeys } from "@/lib/channelService";
+import { enqueueKeys } from "@/lib/channelService";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,7 +17,7 @@ export async function POST(req: NextRequest) {
     const keys = parseKeys(raw);
     if (keys.length === 0) return fail("请提供至少一个 key");
 
-    const result = await uploadKeys(user, keys);
+    const result = await enqueueKeys(user, keys);
     return ok(result);
   } catch (err) {
     return errorResponse(err);

@@ -1,14 +1,26 @@
 "use client";
 
 import { useState } from "react";
-import type { UploadResult } from "@/lib/types";
 import { apiFetch } from "@/lib/client";
 import { useToast } from "@/components/Toast";
-import { Badge, Button, Modal } from "@/components/ui";
+import { Button, Modal } from "@/components/ui";
+
+/**
+ * 上传入队结果 shape（POST /api/my/upload 与 admin 代传均返回此结构）。
+ * 上传不再即时推送到平台，而是先入本地队列，由定时引擎按「每批数量」批量上传。
+ */
+export interface UploadQueueResult {
+  /** 本次去重去空后新增入队的 key 数 */
+  added: number;
+  /** 当前队列中待上传的 key 数 */
+  poolPending: number;
+  /** 当前队列中已上传的 key 数 */
+  poolUploaded: number;
+}
 
 /**
  * 上传 Key 弹窗：粘贴多行 key（每行一个）→ POST 到指定 endpoint（body {keys: 文本}）。
- * 成功后内联展示 UploadResult（action + keyCount + 各站点发布），并回调 onUploaded 刷新父级。
+ * 成功后内联展示入队结果（added / poolPending / poolUploaded），并回调 onUploaded 刷新父级。
  */
 export function UploadKeyModal({
   open,
@@ -21,12 +33,12 @@ export function UploadKeyModal({
   title: string;
   endpoint: string;
   onClose: () => void;
-  onUploaded?: (result: UploadResult) => void;
+  onUploaded?: (result: UploadQueueResult) => void;
 }) {
   const toast = useToast();
   const [text, setText] = useState("");
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<UploadResult | null>(null);
+  const [result, setResult] = useState<UploadQueueResult | null>(null);
 
   function reset() {
     setText("");
@@ -47,13 +59,13 @@ export function UploadKeyModal({
     }
     setLoading(true);
     try {
-      const res = await apiFetch<UploadResult>(endpoint, {
+      const res = await apiFetch<UploadQueueResult>(endpoint, {
         method: "POST",
         body: JSON.stringify({ keys }),
       });
       setResult(res);
       toast.success(
-        `${res.action === "created" ? "已创建渠道" : "已追加"} · ${res.keyCount} 个 key`
+        `已加入队列：新增 ${res.added} 个，待上传 ${res.poolPending}，已上传 ${res.poolUploaded}`
       );
       onUploaded?.(res);
     } catch (err) {
@@ -96,7 +108,7 @@ export function UploadKeyModal({
       ) : (
         <div className="space-y-2">
           <p className="text-sm text-slate-500">
-            每行粘贴一个 key，系统会自动去重去空并追加到渠道。
+            每行粘贴一个 key，系统会自动去重去空并加入本地队列，随后由定时引擎按「每批数量」批量上传。
           </p>
           <textarea
             value={text}
@@ -114,78 +126,37 @@ export function UploadKeyModal({
   );
 }
 
-/** 上传结果视图：可复用于渠道刷新展示 */
-export function UploadResultView({ result }: { result: UploadResult }) {
+/** 入队结果视图：展示本次新增与队列进度，可复用于用户面板 */
+export function UploadResultView({ result }: { result: UploadQueueResult }) {
   return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2 text-sm">
-        <Badge tone={result.action === "created" ? "green" : "blue"}>
-          {result.action === "created" ? "新建渠道" : "追加更新"}
-        </Badge>
-        <span className="text-slate-600">
-          渠道 <b className="text-slate-800">{result.channelName}</b>
-        </span>
-        <span className="text-slate-400">·</span>
-        <span className="text-slate-600">channelId {result.channelId}</span>
-        <span className="text-slate-400">·</span>
-        <span className="text-slate-600">本次 {result.keyCount} 个 key</span>
-        <span className="text-slate-400">·</span>
-        <span className="text-slate-600">累计 {result.uploadedKeyCount} 个</span>
-        {result.platformKeyCount != null && (
-          <>
-            <span className="text-slate-400">·</span>
-            <span className="text-slate-600">
-              平台 {result.platformKeyCount} 个
-            </span>
-          </>
-        )}
-        {result.deadKeyCount != null && (
-          <>
-            <span className="text-slate-400">·</span>
-            <span
-              className={
-                result.deadKeyCount > 0 ? "text-rose-600" : "text-slate-600"
-              }
-            >
-              禁用 {result.deadKeyCount} 个
-            </span>
-          </>
-        )}
-      </div>
+    <div className="grid grid-cols-3 gap-3 text-sm">
+      <Stat label="本次新增" value={result.added} />
+      <Stat
+        label="待上传"
+        value={
+          result.poolPending > 0 ? (
+            <span className="text-amber-600">{result.poolPending}</span>
+          ) : (
+            result.poolPending
+          )
+        }
+      />
+      <Stat label="已上传" value={result.poolUploaded} />
+    </div>
+  );
+}
 
-      <div>
-        <div className="mb-1 text-xs font-medium text-slate-500">站点发布</div>
-        {result.siteAmounts && result.siteAmounts.length > 0 ? (
-          <div className="overflow-hidden rounded-lg border border-slate-200">
-            <table className="w-full text-xs">
-              <thead className="bg-slate-50 text-slate-500">
-                <tr>
-                  <th className="px-3 py-2 text-left font-medium">站点</th>
-                  <th className="px-3 py-2 text-left font-medium">远端 ID</th>
-                  <th className="px-3 py-2 text-right font-medium">used_quota</th>
-                  <th className="px-3 py-2 text-right font-medium">used_amount</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {result.siteAmounts.map((s) => (
-                  <tr key={s.site_id}>
-                    <td className="px-3 py-2 text-slate-700">{s.site_name}</td>
-                    <td className="px-3 py-2 text-slate-500">{s.remote_channel_id}</td>
-                    <td className="px-3 py-2 text-right text-slate-600">
-                      {s.used_quota}
-                    </td>
-                    <td className="px-3 py-2 text-right text-slate-600">
-                      {s.used_amount}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <p className="text-xs text-slate-400">暂无站点发布明细</p>
-        )}
-      </div>
+function Stat({
+  label,
+  value,
+}: {
+  label: string;
+  value: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-lg bg-slate-50 px-3 py-2">
+      <div className="text-xs text-slate-400">{label}</div>
+      <div className="mt-0.5 text-sm font-medium text-slate-800">{value}</div>
     </div>
   );
 }

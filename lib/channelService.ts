@@ -1,5 +1,8 @@
-// 核心业务：把 key 上传到用户绑定的 naci 渠道（创建或追加）。
-// 逻辑严格按 docs/DESIGN.md 第 3 节。
+// 核心业务：本地 key 池 + 批量上传到 naci 渠道（创建或追加）。
+//
+// Phase 2 模型：上传入口只把 key 落本地池（enqueueKeys），由定时引擎
+// （lib/engine.ts）每分钟取一批调 pushBatchToChannel 上传到 naci；每批上传后
+// 启用全部三站（reenableAllSites, all_sites:true）保调度，直到池排空。
 import {
   createChannel,
   findChannelByName,
@@ -9,118 +12,151 @@ import {
 } from "./naci";
 import { parseKeys } from "./supplier";
 import {
+  addKeysToPool,
   addLog,
+  findUserByChannelName,
   getUploadedKeyCount,
+  poolCounts,
   recordUploadedKeys,
   updateUserKeyStats,
   upsertUser,
 } from "./store";
-import type {
-  KeyStats,
-  NaciChannel,
-  SiteAmount,
-  UploadResult,
-  User,
-} from "./types";
+import type { EnqueueResult, KeyStats, NaciChannel, User } from "./types";
 
 /**
- * 解析用户绑定渠道的 naci id：
- * 1. 若 user.channelId 有值 → getChannel 校验存在且名称一致；异常/不一致视为未解析。
+ * 按渠道名解析 naci 渠道：
+ * 1. 若有缓存 channelId → getChannel 校验存在且名称一致；异常/不一致视为未解析。
  * 2. 未解析 → findChannelByName 按名称扫描。
  * 返回命中的渠道详情（含 id）或 null。
  */
-async function resolveChannel(user: User): Promise<NaciChannel | null> {
-  const name = user.channelName.trim();
-  if (!name) return null;
+async function resolveChannelByName(
+  name: string,
+  cachedId?: number | null
+): Promise<NaciChannel | null> {
+  const target = name.trim();
+  if (!target) return null;
 
-  if (user.channelId != null) {
+  if (cachedId != null) {
     try {
-      const detail = await getChannel(user.channelId);
-      if (detail && detail.name === name) return detail;
+      const detail = await getChannel(cachedId);
+      if (detail && detail.name === target) return detail;
     } catch {
       // 缓存 id 失效，回退到按名称查找
     }
   }
 
-  return findChannelByName(name);
+  return findChannelByName(target);
 }
 
-/** 上传 key：解析渠道 → 追加或创建 → 回写 id → 拉详情取站点用量 → 记日志。 */
-export async function uploadKeys(
+/** 上传入口：只把 key 落本地池，不直接调 naci（由定时引擎逐批上传）。 */
+export async function enqueueKeys(
   user: User,
   keys: string[]
-): Promise<UploadResult> {
+): Promise<EnqueueResult> {
   const channelName = user.channelName.trim();
   if (!channelName) {
     throw new Error("当前用户未绑定渠道名称，无法上传 key");
   }
 
-  // 再次去重去空，防御调用方传入脏数据
   const cleanKeys = parseKeys(keys.join("\n"));
   if (cleanKeys.length === 0) {
     throw new Error("没有有效的 key");
   }
+
+  const { added, pending, uploaded } = await addKeysToPool(
+    channelName,
+    cleanKeys
+  );
+
+  await addLog({
+    level: "info",
+    actor: user.username,
+    channelName,
+    message: `入队 ${added} 个新 key（待上传 ${pending}，已上传 ${uploaded}）`,
+  });
+
+  return { added, poolPending: pending, poolUploaded: uploaded };
+}
+
+/** 批量推送结果（供引擎/手动触发使用）。 */
+export interface BatchPushResult {
+  action: "created" | "updated";
+  channelId: number;
+  platformKeyCount?: number;
+  deadKeyCount?: number;
+}
+
+/**
+ * 把一批 key 追加到指定渠道（核心上传逻辑，供定时引擎调用）：
+ * 解析渠道（缺则创建聚合渠道 / 有则追加）→ 重开全部三站取真实 key 统计 →
+ * 回写渠道 id 与统计缓存到绑定用户 → 记录累计去重数 → 记日志。
+ */
+export async function pushBatchToChannel(
+  channelName: string,
+  keys: string[]
+): Promise<BatchPushResult> {
+  const name = channelName.trim();
+  if (!name) throw new Error("渠道名称为空，无法上传");
+
+  const cleanKeys = parseKeys(keys.join("\n"));
+  if (cleanKeys.length === 0) throw new Error("没有有效的 key");
   const keyText = cleanKeys.join("\n");
 
-  const existing = await resolveChannel(user);
+  // 绑定该渠道的用户：用于复用 channelId 缓存 + 回写统计（渠道名全局唯一）
+  const user = await findUserByChannelName(name);
+
+  const existing = await resolveChannelByName(name, user?.channelId);
 
   let channelId: number;
-  let action: UploadResult["action"];
+  let action: BatchPushResult["action"];
   if (existing) {
-    await updateChannel({ id: existing.id, name: channelName, keyText });
+    await updateChannel({ id: existing.id, name, keyText });
     channelId = existing.id;
     action = "updated";
   } else {
-    const created = await createChannel({ name: channelName, keyText });
+    const created = await createChannel({ name, keyText });
     channelId = created.id;
     action = "created";
   }
 
-  // 上传即重开所有站点，并拿到平台上的真实 key 统计（multi_key_size / 禁用数）
+  // 每批上传后启用全部三站（all_sites:true,status:1）保调度，并取真实 key 统计
   let keyStats: KeyStats | null = null;
   try {
     keyStats = await reenableAllSites(channelId);
-    // 落库缓存，供 GET /api/my/channel 复用（避免读接口触发有副作用的重开）
-    await updateUserKeyStats(user.id, {
-      platformKeyCount: keyStats.platformKeyCount,
-      deadKeyCount: keyStats.deadKeyCount,
-    });
   } catch (err) {
-    // 重开失败不阻断上传主流程，记 warn 日志
     await addLog({
       level: "warn",
-      actor: user.username,
-      channelName,
+      actor: user?.username ?? "engine",
+      channelName: name,
       channelId,
       message: `重开站点失败：${err instanceof Error ? err.message : String(err)}`,
     });
   }
 
-  // 回写解析到的 channelId
-  if (user.channelId !== channelId) {
-    await upsertUser({
-      ...user,
-      channelId,
-      updatedAt: new Date().toISOString(),
-    });
-  }
-
-  // 拉最新详情取站点发布明细（admin-hub 详情未必带用量，容错处理）
-  let siteAmounts: SiteAmount[] | undefined;
-  try {
-    const detail = await getChannel(channelId);
-    siteAmounts = detail.site_amounts;
-  } catch {
-    // 详情拉取失败不影响上传结果本身
+  // 回写 channelId 与 key 统计缓存到绑定用户
+  if (user) {
+    if (user.channelId !== channelId) {
+      await upsertUser({
+        ...user,
+        channelId,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    if (keyStats) {
+      await updateUserKeyStats(user.id, {
+        platformKeyCount: keyStats.platformKeyCount,
+        deadKeyCount: keyStats.deadKeyCount,
+      });
+    }
   }
 
   // 记录累计去重 key 数（naci 不返回 key 数量，本系统自行统计）
-  const uploadedKeyCount = await recordUploadedKeys(channelName, cleanKeys);
+  const uploadedKeyCount = await recordUploadedKeys(name, cleanKeys);
 
   await addLog({
     level: "success",
-    actor: user.username,
-    channelName,
+    actor: user?.username ?? "engine",
+    channelName: name,
     channelId,
     message: `${action === "created" ? "创建渠道并上传" : "向渠道追加"} ${cleanKeys.length} 个 key（累计 ${uploadedKeyCount}${
       keyStats ? `，平台 ${keyStats.platformKeyCount} 个/禁用 ${keyStats.deadKeyCount}` : ""
@@ -130,24 +166,28 @@ export async function uploadKeys(
   return {
     action,
     channelId,
-    channelName,
-    keyCount: cleanKeys.length,
-    uploadedKeyCount,
-    siteAmounts,
     platformKeyCount: keyStats?.platformKeyCount,
     deadKeyCount: keyStats?.deadKeyCount,
   };
 }
 
-/** 供 GET /api/my/channel 用：解析并返回渠道详情，不写 key。 */
+/** 供 GET /api/my/channel 用：解析并返回渠道详情 + 本地池进度，不写 key。 */
 export async function resolveMyChannel(user: User) {
   const channelName = user.channelName.trim();
   if (!channelName) {
-    return { exists: false as const, channelName: "", uploadedKeyCount: 0 };
+    return {
+      exists: false as const,
+      channelName: "",
+      uploadedKeyCount: 0,
+      poolPending: 0,
+      poolUploaded: 0,
+    };
   }
 
   const uploadedKeyCount = await getUploadedKeyCount(channelName);
-  const detail = await resolveChannel(user);
+  const { pending: poolPending, uploaded: poolUploaded } =
+    await poolCounts(channelName);
+  const detail = await resolveChannelByName(channelName, user.channelId);
 
   // 顺带把解析结果缓存回用户，保持 channelId 与平台一致
   const resolvedId = detail ? detail.id : null;
@@ -160,7 +200,13 @@ export async function resolveMyChannel(user: User) {
   }
 
   if (!detail) {
-    return { exists: false as const, channelName, uploadedKeyCount };
+    return {
+      exists: false as const,
+      channelName,
+      uploadedKeyCount,
+      poolPending,
+      poolUploaded,
+    };
   }
 
   // 平台真实 key 统计：读上传时落库的缓存，GET 不触发有副作用的重开/额外拉取
@@ -177,6 +223,8 @@ export async function resolveMyChannel(user: User) {
     usedAmount: detail.used_amount,
     siteAmounts: detail.site_amounts,
     uploadedKeyCount,
+    poolPending,
+    poolUploaded,
     platformKeyCount: user.platformKeyCount ?? undefined,
     deadKeyCount: user.deadKeyCount ?? undefined,
   };

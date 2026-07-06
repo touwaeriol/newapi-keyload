@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 import { errorResponse, fail, ok, requireAdmin } from "@/lib/auth";
 import { findUserById } from "@/lib/store";
 import { parseKeys } from "@/lib/supplier";
-import { uploadKeys } from "@/lib/channelService";
+import { enqueueKeys } from "@/lib/channelService";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,7 +24,7 @@ export async function POST(
     const keys = parseKeys(raw);
     if (keys.length === 0) return fail("请提供至少一个 key");
 
-    const result = await uploadKeys(target, keys);
+    const result = await enqueueKeys(target, keys);
     return ok(result);
   } catch (err) {
     return errorResponse(err);

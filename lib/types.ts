@@ -30,6 +30,20 @@ export interface SystemConfig {
   naciPassword?: string;
   /** 旧 new-api 兼容端点的 Bearer token（可选；转向 admin-hub 后保留兼容，非必填） */
   naciToken?: string;
+  /** 定时引擎每批从本地 key 池取出并上传的数量（1~1000） */
+  uploadBatchSize: number;
+  /** 是否启用自动补 key（定时引擎每分钟从本地池批量上传） */
+  autoRefillEnabled: boolean;
+}
+
+/** 入池（enqueue）结果：key 先落本地池，由定时引擎逐批上传。 */
+export interface EnqueueResult {
+  /** 本次新增入池的 key 数（去重后） */
+  added: number;
+  /** 该渠道池内待上传（pending）的 key 数 */
+  poolPending: number;
+  /** 该渠道池内已上传（uploaded）的 key 数 */
+  poolUploaded: number;
 }
 
 export type LogLevel = "info" | "success" | "warn" | "error";
