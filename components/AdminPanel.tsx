@@ -216,7 +216,7 @@ function ConfigCard() {
           <div className="grid gap-3 md:grid-cols-2">
             <Field
               label="每批上传数量"
-              hint="后端每分钟从本地队列批量上传，每批 N 个，上传后自动启用三站"
+              hint="后端每分钟从本地库批量上传到站点，每批 N 个，上传后自动启用三站"
             >
               <TextInput
                 type="number"
@@ -227,7 +227,7 @@ function ConfigCard() {
                 placeholder={String(DEFAULT_BATCH_SIZE)}
               />
             </Field>
-            <Field label="自动补 key" hint="关闭后队列不再自动上传，仅入池">
+            <Field label="自动补 key" hint="关闭后不再自动上传到站点，仅录入本地库">
               <label className="flex cursor-pointer items-center gap-2 py-2 text-sm text-slate-700">
                 <input
                   type="checkbox"
@@ -422,8 +422,8 @@ function UsersCard() {
                 <th className="py-2 pr-3 font-medium">渠道状态</th>
                 <th className="py-2 pr-3 text-right font-medium">可用/平台Key</th>
                 <th className="py-2 pr-3 text-right font-medium">禁用</th>
-                <th className="py-2 pr-3 text-right font-medium">待上传</th>
-                <th className="py-2 pr-3 text-right font-medium">已上传</th>
+                <th className="py-2 pr-3 text-right font-medium">待上传站点</th>
+                <th className="py-2 pr-3 text-right font-medium">已上传站点</th>
                 <th className="py-2 pr-3 font-medium">访问密钥</th>
                 <th className="py-2 pr-3 text-right font-medium">操作</th>
               </tr>

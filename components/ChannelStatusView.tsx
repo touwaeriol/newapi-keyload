@@ -125,7 +125,7 @@ export function ChannelStatusView({ channel }: { channel: ChannelStatus | null }
         <Stat label="类型" value={channel.type ?? "-"} />
         <Stat label="分组" value={channel.group ?? "-"} />
         <Stat label="优先级" value={channel.priority ?? "-"} />
-        <Stat label="已上传 Key 数" value={channel.uploadedKeyCount ?? 0} />
+        <Stat label="累计上传站点(去重)" value={channel.uploadedKeyCount ?? 0} />
         <Stat
           label="平台 Key 数"
           value={
@@ -163,7 +163,7 @@ export function ChannelStatusView({ channel }: { channel: ChannelStatus | null }
           }
         />
         <Stat
-          label="待上传(队列)"
+          label="待上传站点(本地库)"
           value={
             channel.poolPending == null ? (
               "-"
@@ -179,7 +179,7 @@ export function ChannelStatusView({ channel }: { channel: ChannelStatus | null }
           }
         />
         <Stat
-          label="已上传(队列)"
+          label="已上传站点(本地库)"
           value={channel.poolUploaded == null ? "-" : channel.poolUploaded}
         />
       </div>
@@ -265,12 +265,16 @@ function Stat({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-/** 上传进度：累计已上传 / 待上传 / 每批数量 / 进度条 / 下一次检查倒计时 / 预计批次。 */
+/**
+ * 上传进度。术语：
+ * 「录入」= 已保存到本系统数据库（本地库）；「上传」= 已推送到 naci 站点。
+ * 已录入 = 待上传站点 + 已上传站点。
+ */
 function UploadProgress({ channel }: { channel: ChannelStatus }) {
-  const uploaded = channel.poolUploaded ?? 0;
-  const pending = channel.poolPending ?? 0;
-  const total = uploaded + pending;
-  const pct = total > 0 ? Math.round((uploaded / total) * 100) : 0;
+  const uploaded = channel.poolUploaded ?? 0; // 已上传站点
+  const pending = channel.poolPending ?? 0; // 待上传站点
+  const recorded = uploaded + pending; // 已录入（本地库）
+  const pct = recorded > 0 ? Math.round((uploaded / recorded) * 100) : 0;
   const batch = channel.uploadBatchSize ?? 0;
   const remainingBatches = batch > 0 ? Math.ceil(pending / batch) : 0;
   const auto = channel.autoRefillEnabled;
@@ -292,13 +296,13 @@ function UploadProgress({ channel }: { channel: ChannelStatus }) {
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <BigStat label="累计已上传" value={uploaded} />
+        <BigStat label="已录入(本地库)" value={recorded} />
         <BigStat
-          label="待上传"
+          label="待上传站点"
           value={pending}
           tone={pending > 0 ? "amber" : undefined}
         />
-        <BigStat label="每批数量" value={batch || "-"} />
+        <BigStat label="已上传站点" value={uploaded} />
         <BigStat
           label="可用 / 平台 Key"
           value={
@@ -322,7 +326,7 @@ function UploadProgress({ channel }: { channel: ChannelStatus }) {
       {/* 进度条 */}
       <div className="mt-3">
         <div className="mb-1 flex justify-between text-xs text-slate-500">
-          <span>{`已上传 ${uploaded} / 共 ${total}`}</span>
+          <span>{`已上传站点 ${uploaded} / 已录入 ${recorded}`}</span>
           <span>{pct}%</span>
         </div>
         <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
@@ -336,8 +340,12 @@ function UploadProgress({ channel }: { channel: ChannelStatus }) {
       {/* 上一次检查结果 */}
       <LastCheckResult check={channel.lastCheck} />
 
-      {/* 下一次检查 + 预计 */}
+      {/* 每批数量 + 下一次检查 + 预计 */}
       <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
+        <span>
+          每批上传：
+          <span className="font-medium text-slate-700">{batch || "-"}</span> 个/次
+        </span>
         <span>
           下一次检查：
           <span className="font-medium text-slate-700">
@@ -346,8 +354,8 @@ function UploadProgress({ channel }: { channel: ChannelStatus }) {
         </span>
         {pending > 0 && batch > 0 && (
           <span>
-            待上传约 <b className="text-slate-700">{remainingBatches}</b> 批（每批约 1 分钟，≈{" "}
-            {remainingBatches} 分钟完成）
+            待上传站点约 <b className="text-slate-700">{remainingBatches}</b> 批（每批约 1 分钟，≈{" "}
+            {remainingBatches} 分钟传完）
           </span>
         )}
       </div>

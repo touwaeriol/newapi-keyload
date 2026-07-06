@@ -10,11 +10,11 @@ import { Button, Modal } from "@/components/ui";
  * 上传不再即时推送到平台，而是先入本地队列，由定时引擎按「每批数量」批量上传。
  */
 export interface UploadQueueResult {
-  /** 本次去重去空后新增入队的 key 数 */
+  /** 本次去重去空后新录入本地库的 key 数 */
   added: number;
-  /** 当前队列中待上传的 key 数 */
+  /** 本地库中待上传站点的 key 数 */
   poolPending: number;
-  /** 当前队列中已上传的 key 数 */
+  /** 本地库中已上传站点的 key 数 */
   poolUploaded: number;
 }
 
@@ -65,7 +65,7 @@ export function UploadKeyModal({
       });
       setResult(res);
       toast.success(
-        `已加入队列：新增 ${res.added} 个，待上传 ${res.poolPending}，已上传 ${res.poolUploaded}`
+        `已录入 ${res.added} 个（待上传站点 ${res.poolPending}，已上传站点 ${res.poolUploaded}）`
       );
       onUploaded?.(res);
     } catch (err) {
@@ -108,7 +108,7 @@ export function UploadKeyModal({
       ) : (
         <div className="space-y-2">
           <p className="text-sm text-slate-500">
-            每行粘贴一个 key，系统会自动去重去空并加入本地队列，随后由定时引擎按「每批数量」批量上传。
+            每行粘贴一个 key，系统会自动去重去空并<b>录入本地库</b>，随后由定时引擎按「每批数量」<b>上传到站点</b>。
           </p>
           <textarea
             value={text}
@@ -130,9 +130,9 @@ export function UploadKeyModal({
 export function UploadResultView({ result }: { result: UploadQueueResult }) {
   return (
     <div className="grid grid-cols-3 gap-3 text-sm">
-      <Stat label="本次新增" value={result.added} />
+      <Stat label="本次录入" value={result.added} />
       <Stat
-        label="待上传"
+        label="待上传站点"
         value={
           result.poolPending > 0 ? (
             <span className="text-amber-600">{result.poolPending}</span>
@@ -141,7 +141,7 @@ export function UploadResultView({ result }: { result: UploadQueueResult }) {
           )
         }
       />
-      <Stat label="已上传" value={result.poolUploaded} />
+      <Stat label="已上传站点" value={result.poolUploaded} />
     </div>
   );
 }

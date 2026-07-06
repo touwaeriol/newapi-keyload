@@ -294,7 +294,7 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
       setResult(res);
       setText("");
       toast.success(
-        `已加入队列：新增 ${res.added} 个，待上传 ${res.poolPending}，已上传 ${res.poolUploaded}`
+        `已录入 ${res.added} 个（待上传站点 ${res.poolPending}，已上传站点 ${res.poolUploaded}）`
       );
       onUploaded();
     } catch (err) {
@@ -307,7 +307,7 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
   return (
     <Card
       title="上传 Key"
-      subtitle="每行一个 key，提交后入本地队列，由定时引擎按每批数量批量上传"
+      subtitle="每行一个 key，提交后先录入本地库，由定时引擎按每批数量上传到站点"
     >
       <div className="space-y-3">
         <textarea
