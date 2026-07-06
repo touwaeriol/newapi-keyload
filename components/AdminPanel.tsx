@@ -34,7 +34,7 @@ function toArray<T>(data: unknown, key: string): T[] {
 
 export function AdminPanel() {
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <ConfigCard />
       <UsersCard />
       <LogsCard />
@@ -173,8 +173,8 @@ function ConfigCard() {
       {loading ? (
         <LoadingRow />
       ) : (
-        <div className="space-y-4">
-          <div className="grid gap-4 md:grid-cols-2">
+        <div className="space-y-3">
+          <div className="grid gap-3 md:grid-cols-2">
             <Field label="naciBaseUrl">
               <TextInput
                 value={baseUrl}
@@ -213,7 +213,7 @@ function ConfigCard() {
             </Field>
           </div>
 
-          <div className="grid gap-4 md:grid-cols-2">
+          <div className="grid gap-3 md:grid-cols-2">
             <Field
               label="每批上传数量"
               hint="后端每分钟从本地队列批量上传，每批 N 个，上传后自动启用三站"
@@ -431,26 +431,26 @@ function UsersCard() {
             <tbody className="divide-y divide-slate-100">
               {users.map((u) => (
                 <tr key={u.id} className="align-middle">
-                  <td className="py-2.5 pr-3 font-medium text-slate-800">
+                  <td className="py-2 pr-3 font-medium text-slate-800">
                     {u.username}
                   </td>
-                  <td className="py-2.5 pr-3">
+                  <td className="py-2 pr-3">
                     <Badge tone={u.role === "admin" ? "blue" : "slate"}>
                       {u.role}
                     </Badge>
                   </td>
-                  <td className="py-2.5 pr-3 text-slate-600">{u.channelName}</td>
-                  <td className="py-2.5 pr-3">
+                  <td className="py-2 pr-3 text-slate-600">{u.channelName}</td>
+                  <td className="py-2 pr-3">
                     {u.channelId ? (
                       <Badge tone="green">#{u.channelId}</Badge>
                     ) : (
                       <Badge tone="amber">未创建</Badge>
                     )}
                   </td>
-                  <td className="py-2.5 pr-3 text-right tabular-nums">
+                  <td className="py-2 pr-3 text-right tabular-nums">
                     <KeyUsageCell row={u} />
                   </td>
-                  <td className="py-2.5 pr-3 text-right tabular-nums">
+                  <td className="py-2 pr-3 text-right tabular-nums">
                     {u.deadKeyCount == null ? (
                       <span className="text-slate-400">-</span>
                     ) : (
@@ -463,7 +463,7 @@ function UsersCard() {
                       </span>
                     )}
                   </td>
-                  <td className="py-2.5 pr-3 text-right tabular-nums">
+                  <td className="py-2 pr-3 text-right tabular-nums">
                     <span
                       className={
                         (u.poolPending ?? 0) > 0
@@ -474,10 +474,10 @@ function UsersCard() {
                       {u.poolPending ?? 0}
                     </span>
                   </td>
-                  <td className="py-2.5 pr-3 text-right tabular-nums text-slate-600">
+                  <td className="py-2 pr-3 text-right tabular-nums text-slate-600">
                     {u.poolUploaded ?? 0}
                   </td>
-                  <td className="py-2.5 pr-3">
+                  <td className="py-2 pr-3">
                     {u.accessKey ? (
                       <div className="flex items-center gap-2">
                         <code className="rounded bg-slate-50 px-1.5 py-0.5 text-xs text-slate-500">
@@ -489,7 +489,7 @@ function UsersCard() {
                       <span className="text-xs text-slate-400">—</span>
                     )}
                   </td>
-                  <td className="py-2.5 pr-3">
+                  <td className="py-2 pr-3">
                     <div className="flex items-center justify-end gap-1">
                       {u.channelName && (
                         <Button variant="ghost" onClick={() => openChannel(u)}>

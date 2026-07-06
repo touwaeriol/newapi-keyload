@@ -78,7 +78,7 @@ export function UserPanel({ user }: { user: SafeUser }) {
   }, []);
 
   return (
-    <div className="grid gap-6 lg:grid-cols-2">
+    <div className="grid gap-4 lg:grid-cols-2">
       <ChannelCard
         user={user}
         channel={channel}

@@ -79,7 +79,7 @@ export default function Page() {
       {phase === "ready" && user && (
         <div className="min-h-screen">
           <Header user={user} onLogout={logout} />
-          <main className="mx-auto max-w-6xl px-4 py-6">
+          <main className="mx-auto max-w-6xl px-4 py-4">
             {user.role === "admin" ? <AdminPanel /> : <UserPanel user={user} />}
           </main>
         </div>
