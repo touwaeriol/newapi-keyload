@@ -11,14 +11,20 @@
 export const FIXED_MODELS =
   "claude-sonnet-4-5-20250929,claude-opus-4-5-20251101,claude-sonnet-4-6,claude-haiku-4-5-20251001,claude-opus-4-6,claude-opus-4-7,claude-opus-4-8,claude-sonnet-5,claude-fable-5";
 
-/** 固定优先级 */
-export const FIXED_PRIORITY = 7;
+/**
+ * 固定优先级。laoyu_01 账号的允许范围**不含 7**（naci 报「该优先级不在管理员配置范围内」）；
+ * 用户真实样例证明 5/6 可用，取 5（最近样例 0708-ANTH-LIU-HAN-009）。若日后账号范围变动只需改此值。
+ */
+export const FIXED_PRIORITY = 5;
 
 /** 固定分组 */
 export const FIXED_GROUP = "anthropic";
 
-/** 聚合渠道所属供应商账号（session 登录用户 laoyu_01 → id 18） */
-export const OWNER_USER_ID = 18;
+/**
+ * 聚合渠道所属供应商账号 id。laoyu_01 的真实 id 为 66（用户 7/8 样例均为 owner_user_id=66，
+ * 且 site 6 远程名为「老余-ice-…」即本账号）。旧值 18 会导致 naci 报「无权选择不可见站点」。
+ */
+export const OWNER_USER_ID = 66;
 
 /**
  * 供应商已知的全部站点（实测 5409 均发布到这三站）。

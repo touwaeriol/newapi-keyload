@@ -17,7 +17,6 @@ import {
   CHANNEL_JSON_TEMPLATE,
   LAST_SELECTED_SITE_IDS_JSON,
   OWNER_USER_ID,
-  SITE_GROUP_OVERRIDES,
 } from "./supplier";
 import type { KeyStats, NaciChannel } from "./types";
 
@@ -313,12 +312,14 @@ export async function createChannel(params: {
     key: params.keyText,
     key_mode: "append",
   };
+  // 注意：受限供应商账号（channel_site_config:false）无权自定义站点分组，
+  // 带 site_group_overrides 会被 naci 拒（"无权选择不可见站点"）。对齐用户成功样例：
+  // 只传 last_selected_site_ids_json 选站，不传 site_group_overrides。
   const body = {
     name: params.name,
     description: "",
     channel_json: JSON.stringify(channelObj),
     last_selected_site_ids_json: LAST_SELECTED_SITE_IDS_JSON,
-    site_group_overrides: SITE_GROUP_OVERRIDES,
     owner_user_id: OWNER_USER_ID,
   };
   const env = await naciFetch<AdminHubRawChannel>(
