@@ -472,8 +472,8 @@ function ConfigCard() {
           <ConfigSection title="高优先级渠道" desc="优先级6配额与自动降级">
             <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
               <Field
-                label="优先级6渠道上限"
-                hint="本地已建优先级6渠道达到此数即改用优先级5创建（账号配额6，0~1000）"
+                label="优先级6渠道上限（每用户）"
+                hint="每个用户各自最多建这么多优先级6渠道，超出改用优先级5创建（每用户计，非全局合计）。可在编辑用户里给个别用户单独设更高/更低配额。仅高优先级模式下则作为全局名额。0~1000"
               >
                 <TextInput
                   type="number"
@@ -740,15 +740,10 @@ function UploadLimitCard() {
               <Badge tone={usageTone(data.global)}>{usageText(data.global)}</Badge>
             </span>
             <span className="flex items-center gap-2">
-              <span className="font-medium text-slate-700">全局高优先级</span>
-              <Badge
-                tone={hpTone(
-                  data.highPriorityGlobal.used,
-                  data.highPriorityGlobal.limit
-                )}
-              >
-                已用 {data.highPriorityGlobal.used} / {data.highPriorityGlobal.limit}{" "}
-                个优先级6
+              <span className="font-medium text-slate-700">高优先级(优先级6)</span>
+              <Badge tone="blue">
+                全局已建 {data.highPriorityGlobal.used} 个 · 每用户上限{" "}
+                {data.highPriorityGlobal.limit}
               </Badge>
             </span>
           </div>
@@ -788,10 +783,14 @@ function UploadLimitCard() {
                           <Badge tone="slate">不可用</Badge>
                         ) : u.hpLimit != null ? (
                           <Badge tone={hpTone(u.hpUsed, u.hpLimit)}>
-                            已用 {u.hpUsed} / {u.hpLimit}
+                            已用 {u.hpUsed} / {u.hpLimit}（自定义）
                           </Badge>
                         ) : (
-                          <Badge tone="blue">已用 {u.hpUsed} · 仅受全局</Badge>
+                          <Badge
+                            tone={hpTone(u.hpUsed, data.highPriorityGlobal.limit)}
+                          >
+                            已用 {u.hpUsed} / {data.highPriorityGlobal.limit}（默认）
+                          </Badge>
                         )}
                       </td>
                     </tr>
