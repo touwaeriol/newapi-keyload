@@ -34,7 +34,9 @@ services:
       # 连接同一 compose 网络内的 db 服务（无需 .env）
       - DATABASE_URL=postgres://keyload:keyload_pw_2f9x@db:5432/keyload
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ >/dev/null 2>&1 || exit 1"]
+      # 必须用 127.0.0.1 而非 localhost：busybox wget 把 localhost 解析成 ::1(IPv6)，
+      # 而 Next 服务只监听 IPv4 → 健康检查恒失败。见 memory: healthcheck-ipv4-localhost。
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/ >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
