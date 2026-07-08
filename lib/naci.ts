@@ -404,9 +404,12 @@ interface ParsedStatusBatch {
  * 解析 status-batch 响应里某渠道的条目（纯函数，不发请求）。
  * 结构：data[id].sites[*] = { site_id, status, channel_info:{multi_key_size, multi_key_status_list} }。
  * - siteStatus：逐站的 site 级 status（1=已打开，非 1=未打开）。
- * - key 统计：每站存活 = list 里 status!==3 的个数，aliveCount 取各站最大值；
- *   multiKeySize = 第一个 multi_key_size（缺则退回 list 最大长度）；deadCount = size-alive（≥0）。
- * data 无该渠道 / 无 sites 时返回 null。
+ * - key 统计（关键）：**只信「已打开站(status===1)」的 key 状态**。naci 对**未打开的站**会把
+ *   该站所有 key 标成 status=3（因为站是关的，并非 key 真死）；而已打开且健康的站返回**空列表**
+ *   （=没有被禁用的 key）。因此：每个已打开站的死键数 = 其 list 里 status===3 的个数（空/无 list → 0）；
+ *   取**已打开站的最小死键数**作为真实死键数（deadCount），aliveCount = size - deadCount。
+ *   无任何已打开站时退回「所有站的最小死键数」；都无信息则按全活。
+ * - multiKeySize = 第一个 multi_key_size（缺则退回 list 最大长度）。data 无该渠道 / 无 sites 返回 null。
  */
 function parseStatusBatch(data: unknown, id: number): ParsedStatusBatch | null {
   if (!data || typeof data !== "object") return null;
@@ -422,35 +425,55 @@ function parseStatusBatch(data: unknown, id: number): ParsedStatusBatch | null {
   const siteStatus = new Map<number, number>();
   let multiKeySize: number | null = null;
   let maxListLen = 0;
-  let aliveCount = 0;
   let sawList = false;
+  // 各站死键数：已打开站单独统计（可信），所有站汇总作兜底
+  let minDeadOpen: number | null = null;
+  let minDeadAny: number | null = null;
 
   for (const site of sites) {
     if (!site || typeof site !== "object") continue;
     const s = site as Record<string, unknown>;
 
-    if (typeof s.site_id === "number" && typeof s.status === "number") {
-      siteStatus.set(s.site_id, s.status);
+    const st = typeof s.status === "number" ? s.status : null;
+    if (typeof s.site_id === "number" && st !== null) {
+      siteStatus.set(s.site_id, st);
     }
 
     const info = s.channel_info as Record<string, unknown> | undefined;
-    if (info && typeof info === "object") {
-      if (multiKeySize === null && typeof info.multi_key_size === "number") {
-        multiKeySize = info.multi_key_size;
-      }
-      const list = info.multi_key_status_list;
-      if (list && typeof list === "object") {
-        sawList = true;
-        const statuses = Object.values(list as Record<string, unknown>);
-        maxListLen = Math.max(maxListLen, statuses.length);
-        const alive = statuses.filter((x) => Number(x) !== 3).length;
-        if (alive > aliveCount) aliveCount = alive;
+    if (!info || typeof info !== "object") continue;
+    if (multiKeySize === null && typeof info.multi_key_size === "number") {
+      multiKeySize = info.multi_key_size;
+    }
+
+    // 计算该站死键数：有 list → 数 status===3；无 list 但有 size → 视为 0 死（该站无禁用信息）
+    const list = info.multi_key_status_list;
+    let deadOnSite: number | null = null;
+    if (list && typeof list === "object") {
+      sawList = true;
+      const statuses = Object.values(list as Record<string, unknown>).map((x) =>
+        Number(x)
+      );
+      maxListLen = Math.max(maxListLen, statuses.length);
+      deadOnSite = statuses.filter((x) => x === 3).length;
+    } else if (typeof info.multi_key_size === "number") {
+      deadOnSite = 0;
+    }
+
+    if (deadOnSite !== null) {
+      minDeadAny =
+        minDeadAny === null ? deadOnSite : Math.min(minDeadAny, deadOnSite);
+      if (st === 1) {
+        minDeadOpen =
+          minDeadOpen === null ? deadOnSite : Math.min(minDeadOpen, deadOnSite);
       }
     }
   }
 
   const size = multiKeySize ?? maxListLen;
-  const deadCount = Math.max(0, size - aliveCount);
+  // 真实死键数：优先取已打开站的最小值；无已打开站退回所有站最小值；都无则 0（全活）。
+  const dead = minDeadOpen ?? minDeadAny ?? 0;
+  const deadCount = Math.max(0, Math.min(size, dead));
+  const aliveCount = size - deadCount;
   return { siteStatus, multiKeySize: size, aliveCount, deadCount, hasKeyInfo: sawList };
 }
 
