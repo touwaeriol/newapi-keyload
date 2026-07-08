@@ -7,15 +7,30 @@
 // admin-hub 的请求体顶层携带 channel_json（字符串，内部即完整渠道含 key），外加
 // last_selected_site_ids_json / site_group_overrides / owner_user_id 控制发布到哪些站点。
 
-/** 固定模型列表（逗号分隔，new-api 原生格式） */
-export const FIXED_MODELS =
-  "claude-sonnet-4-5-20250929,claude-opus-4-5-20251101,claude-sonnet-4-6,claude-haiku-4-5-20251001,claude-opus-4-6,claude-opus-4-7,claude-opus-4-8,claude-sonnet-5,claude-fable-5";
+/** 模型列表默认值（管理员可在系统配置里改；逗号分隔，new-api 原生格式）。 */
+export const DEFAULT_MODELS =
+  "claude-opus-4-6,claude-opus-4-7,claude-opus-4-8";
+
+/** 兼容旧引用：保留 FIXED_MODELS 作为兜底默认值（= DEFAULT_MODELS）。 */
+export const FIXED_MODELS = DEFAULT_MODELS;
 
 /**
- * 固定优先级。laoyu_01 账号的允许范围**不含 7**（naci 报「该优先级不在管理员配置范围内」）；
- * 用户真实样例证明 5/6 可用，取 5（最近样例 0708-ANTH-LIU-HAN-009）。若日后账号范围变动只需改此值。
+ * 新建渠道优先级：6（账号允许 3/5/6，其中 6 为高优先级但配额仅 6 个）。
+ * 渠道退化后由定时任务降到 DEMOTED_PRIORITY(5)，腾出优先级 6 配额。
  */
-export const FIXED_PRIORITY = 5;
+export const FIXED_PRIORITY = 6;
+
+/** 退化渠道降级到的优先级。 */
+export const DEMOTED_PRIORITY = 5;
+
+/**
+ * 降级判定只看这些站点是否被禁用（排除对本账号结构性一直未打开的 AGT/13）。
+ * 当其中任一站为「禁用(2)」或「自动禁用(3)」时，把渠道从 6 降到 5。
+ */
+export const DEMOTE_TRIGGER_SITE_IDS = [6, 21];
+
+/** 降级宽限（分钟）：渠道刚建、站点尚未就绪时不判降级，避免误降。 */
+export const DEMOTE_GRACE_MINUTES = 5;
 
 /** 固定分组 */
 export const FIXED_GROUP = "anthropic";

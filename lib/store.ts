@@ -3,7 +3,7 @@
 // 因此 channelService.ts 与所有 route 无需改动。
 import crypto from "crypto";
 import { Pool } from "pg";
-import { buildChannelName } from "./supplier";
+import { buildChannelName, DEFAULT_MODELS } from "./supplier";
 import type { LogEntry, LogLevel, Role, SystemConfig, User } from "./types";
 
 // —— seed 默认值 ——
@@ -16,6 +16,7 @@ const SEED_NACI_PASSWORD = "";
 // 定时补 key 引擎默认参数（可在系统配置中调整）
 const SEED_UPLOAD_BATCH_SIZE = 20; // 聚合 key 数量（每渠道）
 const SEED_PROCESS_BATCH_SIZE = 20; // 每批处理数量（每轮/每次处理多少 key）
+const SEED_MODELS = DEFAULT_MODELS; // 模型列表默认（管理员可配）
 const SEED_AUTO_REFILL_ENABLED = true;
 const SEED_REFILL_INTERVAL_MINUTES = 1;
 
@@ -120,6 +121,10 @@ async function createTables(pool: Pool): Promise<void> {
   await pool.query(
     `ALTER TABLE config ADD COLUMN IF NOT EXISTS process_batch_size int NOT NULL DEFAULT 20`
   );
+  // 模型列表（管理员可配）；旧库默认 3 个 opus。
+  await pool.query(
+    `ALTER TABLE config ADD COLUMN IF NOT EXISTS models text NOT NULL DEFAULT '${SEED_MODELS}'`
+  );
   await pool.query(
     `ALTER TABLE config ADD COLUMN IF NOT EXISTS auto_refill_enabled boolean NOT NULL DEFAULT true`
   );
@@ -174,12 +179,18 @@ async function createTables(pool: Pool): Promise<void> {
       channel_name text NOT NULL,
       channel_id   integer,
       key_count    int  NOT NULL DEFAULT 0,
+      priority     int  NOT NULL DEFAULT 6,
       created_at   timestamptz NOT NULL DEFAULT now(),
       UNIQUE(prefix, suffix)
     )
   `);
   await pool.query(
     `CREATE INDEX IF NOT EXISTS idx_created_channels_prefix ON created_channels(prefix)`
+  );
+  // 兼容旧库：新增渠道优先级列。旧渠道均建于优先级 5（历史 FIXED_PRIORITY=5），
+  // 故已存在行回填 5；新建渠道由 finalizeCreatedChannel 显式写 6。
+  await pool.query(
+    `ALTER TABLE created_channels ADD COLUMN IF NOT EXISTS priority int NOT NULL DEFAULT 5`
   );
   // 每个已建渠道在各站点的远程渠道 id / 名称（来自 naci 创建响应 publish_results）。
   // created_channel_id 引用 created_channels.id；渠道占位行删除时级联清理。
@@ -402,12 +413,13 @@ export async function getConfig(): Promise<SystemConfig> {
     naci_token: string;
     naci_username: string;
     naci_password: string;
+    models: string;
     upload_batch_size: number;
     process_batch_size: number;
     auto_refill_enabled: boolean;
     refill_interval_minutes: number;
   }>(
-    "SELECT naci_base_url, naci_token, naci_username, naci_password, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes FROM config WHERE id = 1"
+    "SELECT naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes FROM config WHERE id = 1"
   );
   if (!rows[0]) {
     return {
@@ -415,6 +427,7 @@ export async function getConfig(): Promise<SystemConfig> {
       naciToken: SEED_NACI_TOKEN,
       naciUsername: SEED_NACI_USERNAME,
       naciPassword: SEED_NACI_PASSWORD,
+      models: SEED_MODELS,
       uploadBatchSize: SEED_UPLOAD_BATCH_SIZE,
       processBatchSize: SEED_PROCESS_BATCH_SIZE,
       autoRefillEnabled: SEED_AUTO_REFILL_ENABLED,
@@ -426,6 +439,7 @@ export async function getConfig(): Promise<SystemConfig> {
     naciToken: rows[0].naci_token,
     naciUsername: rows[0].naci_username,
     naciPassword: rows[0].naci_password,
+    models: (rows[0].models || SEED_MODELS).trim(),
     uploadBatchSize: clampBatchSize(rows[0].upload_batch_size),
     processBatchSize: clampProcessBatchSize(rows[0].process_batch_size),
     autoRefillEnabled: Boolean(rows[0].auto_refill_enabled),
@@ -435,14 +449,16 @@ export async function getConfig(): Promise<SystemConfig> {
 
 export async function saveConfig(cfg: SystemConfig): Promise<void> {
   const pool = await ensureReady();
+  const models = (cfg.models ?? "").trim() || SEED_MODELS;
   await pool.query(
-    `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes)
-     VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8)
+    `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes)
+     VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9)
      ON CONFLICT (id) DO UPDATE SET
        naci_base_url = EXCLUDED.naci_base_url,
        naci_token = EXCLUDED.naci_token,
        naci_username = EXCLUDED.naci_username,
        naci_password = EXCLUDED.naci_password,
+       models = EXCLUDED.models,
        upload_batch_size = EXCLUDED.upload_batch_size,
        process_batch_size = EXCLUDED.process_batch_size,
        auto_refill_enabled = EXCLUDED.auto_refill_enabled,
@@ -452,6 +468,7 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
       cfg.naciToken ?? "",
       cfg.naciUsername ?? "",
       cfg.naciPassword ?? "",
+      models,
       clampBatchSize(cfg.uploadBatchSize),
       clampProcessBatchSize(cfg.processBatchSize),
       cfg.autoRefillEnabled ?? SEED_AUTO_REFILL_ENABLED,
@@ -730,6 +747,8 @@ export interface CreatedChannel {
   channelName: string;
   channelId: number | null;
   keyCount: number;
+  /** 本系统记录的当前优先级（6=新建，5=退化后降级）。 */
+  priority: number;
   createdAt: string;
 }
 
@@ -740,6 +759,7 @@ interface CreatedChannelRow {
   channel_name: string;
   channel_id: number | null;
   key_count: number;
+  priority: number;
   created_at: Date | string;
 }
 
@@ -751,6 +771,7 @@ function rowToCreatedChannel(r: CreatedChannelRow): CreatedChannel {
     channelName: r.channel_name,
     channelId: r.channel_id === null ? null : Number(r.channel_id),
     keyCount: Number(r.key_count),
+    priority: Number(r.priority),
     createdAt: toIso(r.created_at),
   };
 }
@@ -796,15 +817,27 @@ export async function allocateCreatedChannel(
   }
 }
 
-/** naci 渠道创建成功后回填 channel_id / key_count。 */
+/** naci 渠道创建成功后回填 channel_id / key_count / priority。 */
 export async function finalizeCreatedChannel(
   id: string,
-  data: { channelId: number; keyCount: number }
+  data: { channelId: number; keyCount: number; priority: number }
 ): Promise<void> {
   const pool = await ensureReady();
   await pool.query(
-    `UPDATE created_channels SET channel_id = $2, key_count = $3 WHERE id = $1`,
-    [id, data.channelId, data.keyCount]
+    `UPDATE created_channels SET channel_id = $2, key_count = $3, priority = $4 WHERE id = $1`,
+    [id, data.channelId, data.keyCount, data.priority]
+  );
+}
+
+/** 更新某已建渠道（按 naci channel_id）的本地记录优先级（降级后回写）。 */
+export async function updateCreatedChannelPriority(
+  channelId: number,
+  priority: number
+): Promise<void> {
+  const pool = await ensureReady();
+  await pool.query(
+    `UPDATE created_channels SET priority = $2 WHERE channel_id = $1`,
+    [channelId, priority]
   );
 }
 

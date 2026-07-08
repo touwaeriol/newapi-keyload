@@ -7,6 +7,7 @@
 // 引擎内任何异常都被捕获，绝不让 tick 抛出而中断定时器或 crash 进程。
 import {
   createChannelsDrain,
+  demoteDegradedChannels,
   refreshPrefixRealtime,
 } from "./channelService";
 import {
@@ -118,6 +119,17 @@ async function processPrefix(
       // 池里有 key 但没有绑定该前缀的用户：跳过（无法回写统计）
       recordResult(prefix, "empty", "无绑定用户，跳过");
       return;
+    }
+
+    // 每轮先做退化降级（把站点退化的渠道从优先级 6 降到 5，腾出配额）
+    try {
+      await demoteDegradedChannels(user);
+    } catch (err) {
+      await safeLog(
+        "error",
+        prefix,
+        `降级检查失败：${err instanceof Error ? err.message : String(err)}`
+      );
     }
 
     const { pending } = await poolCounts(prefix);

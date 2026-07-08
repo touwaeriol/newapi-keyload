@@ -49,6 +49,8 @@ interface ConfigResponse {
   naciBaseUrl: string;
   naciUsername: string;
   hasNaciPassword: boolean;
+  /** 新建渠道使用的模型列表（逗号分隔，管理员可配） */
+  models: string;
   /** 聚合 key 数量：每个新建渠道聚合多少个 key */
   uploadBatchSize: number;
   /** 每批处理数量：每轮/每次处理多少个 key */
@@ -62,6 +64,7 @@ interface ConfigResponse {
 const DEFAULT_BATCH_SIZE = 20;
 const DEFAULT_PROCESS_BATCH = 20;
 const DEFAULT_INTERVAL_MINUTES = 1;
+const DEFAULT_MODELS = "claude-opus-4-6,claude-opus-4-7,claude-opus-4-8";
 
 function ConfigCard() {
   const toast = useToast();
@@ -69,6 +72,7 @@ function ConfigCard() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [hasPassword, setHasPassword] = useState(false);
+  const [models, setModels] = useState<string>(DEFAULT_MODELS);
   const [batchSize, setBatchSize] = useState<number>(DEFAULT_BATCH_SIZE);
   const [processBatch, setProcessBatch] = useState<number>(DEFAULT_PROCESS_BATCH);
   const [intervalMin, setIntervalMin] = useState<number>(
@@ -96,6 +100,11 @@ function ConfigCard() {
       setBaseUrl(data.naciBaseUrl ?? "");
       setUsername(data.naciUsername ?? "");
       setHasPassword(Boolean(data.hasNaciPassword));
+      setModels(
+        typeof data.models === "string" && data.models.trim()
+          ? data.models
+          : DEFAULT_MODELS
+      );
       setBatchSize(
         typeof data.uploadBatchSize === "number" && data.uploadBatchSize > 0
           ? data.uploadBatchSize
@@ -156,6 +165,7 @@ function ConfigCard() {
           naciBaseUrl,
           naciUsername: username.trim(),
           naciPassword: password,
+          models: models.trim() || DEFAULT_MODELS,
           uploadBatchSize: safeBatch,
           processBatchSize: safeProcess,
           autoRefillEnabled: autoRefill,
@@ -245,6 +255,19 @@ function ConfigCard() {
               </div>
             </Field>
           </div>
+
+          <Field
+            label="模型列表"
+            hint="新建渠道使用的模型，逗号分隔；默认 claude-opus-4-6,claude-opus-4-7,claude-opus-4-8"
+          >
+            <textarea
+              value={models}
+              onChange={(e) => setModels(e.target.value)}
+              rows={2}
+              placeholder={DEFAULT_MODELS}
+              className="w-full resize-y rounded-lg border border-slate-300 px-3 py-2 font-mono text-xs text-slate-800 outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100"
+            />
+          </Field>
 
           <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
             <Field

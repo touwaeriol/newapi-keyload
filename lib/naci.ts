@@ -305,12 +305,16 @@ function parsePublishResults(raw: unknown): PublishResult[] {
 export async function createChannel(params: {
   name: string;
   keyText: string; // 已用 \n 连接的多 key
+  models?: string; // 模型列表（管理员可配）；缺省用模板默认
 }): Promise<NaciChannel & { publishResults: PublishResult[] }> {
   const channelObj: Record<string, unknown> = {
     ...CHANNEL_JSON_TEMPLATE,
     name: params.name,
     key: params.keyText,
     key_mode: "append",
+    ...(params.models && params.models.trim()
+      ? { models: params.models.trim() }
+      : {}),
   };
   // 注意：受限供应商账号（channel_site_config:false）无权自定义站点分组，
   // 带 site_group_overrides 会被 naci 拒（"无权选择不可见站点"）。对齐用户成功样例：
@@ -332,6 +336,30 @@ export async function createChannel(params: {
     (env.data as { publish_results?: unknown }).publish_results
   );
   return { ...channel, publishResults };
+}
+
+/**
+ * 更新渠道优先级（退化降级用）：按用户要求 **先 GET 渠道详情 → 改 priority → PUT**。
+ * PUT 不传 key（naci 保留原密钥），不传 site_group_overrides（受限账号无权自配站点分组）。
+ */
+export async function setChannelPriority(
+  id: number,
+  priority: number
+): Promise<void> {
+  const detail = await getChannel(id);
+  const inner: Record<string, unknown> = { ...(detail.channelJsonObj ?? {}) };
+  delete inner.key; // 不带 key，PUT 时保留原密钥
+  inner.priority = priority;
+  const body: Record<string, unknown> = {
+    id,
+    name: detail.name,
+    description: (detail.description as string) ?? "",
+    channel_json: JSON.stringify(inner),
+    last_selected_site_ids_json:
+      detail.lastSelectedSiteIdsJson ?? LAST_SELECTED_SITE_IDS_JSON,
+    owner_user_id: detail.ownerUserId ?? OWNER_USER_ID,
+  };
+  await naciFetch("PUT", `/api/admin-hub/channels/${id}`, body);
 }
 
 // —— 站点状态 / key 统计 ——

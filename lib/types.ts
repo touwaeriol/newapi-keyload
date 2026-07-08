@@ -32,6 +32,8 @@ export interface SystemConfig {
   naciPassword?: string;
   /** 旧 new-api 兼容端点的 Bearer token（可选；转向 admin-hub 后保留兼容，非必填） */
   naciToken?: string;
+  /** 新建渠道使用的模型列表（逗号分隔，管理员可配；默认 3 个 opus）。 */
+  models: string;
   /** 聚合 key 数量：每个新建渠道里聚合多少个 key（1~1000）。 */
   uploadBatchSize: number;
   /** 每批处理数量：定时任务每轮 / 直接上传每次处理多少个 key，拆成 ⌈处理数/聚合数⌉ 个渠道（1~10000）。 */

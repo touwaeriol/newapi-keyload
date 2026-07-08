@@ -20,6 +20,8 @@ export interface CreatedChannelView {
   channelName: string;
   suffix: number;
   keyCount: number;
+  /** 当前优先级（6=新建，5=退化后降级） */
+  priority?: number;
   /** 派生状态：3=自动禁用（有 key 但可用为 0），1=正常，null=无 key 信息 */
   status: number | null;
   platformKeyCount: number | null;
@@ -232,7 +234,14 @@ function ChannelRow({
           </div>
           <div className="mt-0.5 text-xs text-slate-400">#{channel.channelId}</div>
         </div>
-        {channelBadge(channel.status)}
+        <div className="flex items-center gap-1.5">
+          {channel.priority != null && (
+            <Badge tone={channel.priority >= 6 ? "green" : "slate"}>
+              P{channel.priority}
+            </Badge>
+          )}
+          {channelBadge(channel.status)}
+        </div>
       </div>
 
       <div className="mt-2 grid grid-cols-3 gap-2 text-xs">

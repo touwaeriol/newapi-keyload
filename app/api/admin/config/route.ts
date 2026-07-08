@@ -16,6 +16,7 @@ export async function GET(req: NextRequest) {
       naciUsername: cfg.naciUsername,
       hasNaciPassword: Boolean(cfg.naciPassword),
       hasNaciToken: Boolean(cfg.naciToken),
+      models: cfg.models,
       uploadBatchSize: cfg.uploadBatchSize,
       processBatchSize: cfg.processBatchSize,
       autoRefillEnabled: cfg.autoRefillEnabled,
@@ -36,6 +37,7 @@ export async function PUT(req: NextRequest) {
       naciUsername?: string;
       naciPassword?: string;
       naciToken?: string;
+      models?: string;
       uploadBatchSize?: number;
       processBatchSize?: number;
       autoRefillEnabled?: boolean;
@@ -45,6 +47,11 @@ export async function PUT(req: NextRequest) {
     if (!naciBaseUrl) return fail("naciBaseUrl 不能为空");
 
     const current = await getConfig();
+    // 未传或为空则保留原值；saveConfig 内部会再兜底默认
+    const models =
+      typeof body.models === "string" && body.models.trim()
+        ? body.models.trim()
+        : current.models;
     const naciUsername = (body.naciUsername ?? current.naciUsername ?? "").trim();
     const naciPassword =
       body.naciPassword && body.naciPassword.length > 0
@@ -79,6 +86,7 @@ export async function PUT(req: NextRequest) {
       naciUsername,
       naciPassword,
       naciToken,
+      models,
       uploadBatchSize,
       processBatchSize,
       autoRefillEnabled,
@@ -91,6 +99,7 @@ export async function PUT(req: NextRequest) {
       naciUsername,
       hasNaciPassword: Boolean(naciPassword),
       hasNaciToken: Boolean(naciToken),
+      models: saved.models,
       uploadBatchSize: saved.uploadBatchSize,
       processBatchSize: saved.processBatchSize,
       autoRefillEnabled: saved.autoRefillEnabled,

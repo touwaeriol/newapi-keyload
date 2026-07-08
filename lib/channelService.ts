@@ -10,9 +10,17 @@ import {
   getChannelSites,
   getChannelsStatusBatch,
   getChannelsUsedQuota,
+  setChannelPriority,
   setSiteStatus,
 } from "./naci";
-import { parseKeys, PUBLISH_SITES } from "./supplier";
+import {
+  DEMOTE_GRACE_MINUTES,
+  DEMOTE_TRIGGER_SITE_IDS,
+  DEMOTED_PRIORITY,
+  FIXED_PRIORITY,
+  parseKeys,
+  PUBLISH_SITES,
+} from "./supplier";
 import {
   addKeysToPool,
   addLog,
@@ -30,6 +38,7 @@ import {
   recordCreatedChannelSites,
   recordUploadedKeys,
   releaseClaim,
+  updateCreatedChannelPriority,
   updateUserKeyStats,
   updateUserUsedQuota,
   upsertUser,
@@ -190,7 +199,11 @@ export async function createChannelFromNextBatch(
   let channelId: number;
   let publishSites: CreatedChannelSite[] = [];
   try {
-    const created = await createChannel({ name: alloc.channelName, keyText });
+    const created = await createChannel({
+      name: alloc.channelName,
+      keyText,
+      models: cfg.models,
+    });
     channelId = created.id;
     // 建渠道即已发布并自动启用站点调度，无需再调 reenableAllSites（旧「手动打开调度」逻辑已移除）。
     // 各站远程渠道 id（publish_results）→ 落库入参（只留拿到 remote id 的站）
@@ -216,6 +229,7 @@ export async function createChannelFromNextBatch(
     await finalizeCreatedChannel(alloc.id, {
       channelId,
       keyCount: cleanKeys.length,
+      priority: FIXED_PRIORITY,
     });
     if (publishSites.length > 0) {
       await recordCreatedChannelSites(alloc.id, publishSites);
@@ -370,6 +384,8 @@ export interface CreatedChannelView {
   suffix: number;
   /** 建渠道时记录的本批 key 数 */
   keyCount: number;
+  /** 本系统记录的当前优先级（6=新建，5=退化后降级） */
+  priority: number;
   /** 派生状态：3=自动禁用（有 key 但可用为 0），1=正常，null=无 key 信息 */
   status: number | null;
   platformKeyCount: number | null;
@@ -484,6 +500,7 @@ async function fetchPrefixRealtime(user: User): Promise<PrefixRealtime> {
       channelName: c.channelName,
       suffix: c.suffix,
       keyCount: c.keyCount,
+      priority: c.priority,
       status,
       platformKeyCount,
       deadKeyCount,
@@ -554,6 +571,74 @@ async function getPrefixRealtimeCached(user: User): Promise<PrefixRealtime> {
   })();
   c.inflight.set(key, p);
   return p;
+}
+
+/**
+ * 退化降级（供定时任务调用）：把该前缀下**已过宽限期、仍在优先级 6** 的渠道，
+ * 逐个用 status-batch 读站点状态；若 DEMOTE_TRIGGER_SITE_IDS（AC/61，忽略结构性未打开的 AGT）
+ * 里任一站为「禁用(2)」或「自动禁用(3)」，则 setChannelPriority 降到 5（GET→改→PUT）并回写本地记录，
+ * 腾出稀缺的优先级 6 配额。返回本轮降级的渠道数。异常自行捕获、不外抛。
+ */
+export async function demoteDegradedChannels(user: User): Promise<number> {
+  const prefix = user.channelName.trim();
+  if (!prefix) return 0;
+
+  const channels = await listCreatedChannels(prefix);
+  const graceMs = DEMOTE_GRACE_MINUTES * 60_000;
+  const now = Date.now();
+  const candidates = channels.filter(
+    (c) =>
+      c.channelId != null &&
+      c.priority > DEMOTED_PRIORITY &&
+      now - new Date(c.createdAt).getTime() > graceMs
+  );
+  if (candidates.length === 0) return 0;
+
+  const ids = candidates.map((c) => c.channelId as number);
+  let statusMap: Awaited<ReturnType<typeof getChannelsStatusBatch>>;
+  try {
+    statusMap = await getChannelsStatusBatch(ids);
+  } catch {
+    return 0; // 读站点状态失败，本轮跳过
+  }
+
+  let demoted = 0;
+  for (const c of candidates) {
+    const st = statusMap.get(c.channelId as number);
+    if (!st) continue;
+    const siteStatus = new Map(st.sites.map((s) => [s.site_id, s.status]));
+    const degraded = DEMOTE_TRIGGER_SITE_IDS.some((sid) => {
+      const s = siteStatus.get(sid);
+      return s === 2 || s === 3;
+    });
+    if (!degraded) continue;
+
+    try {
+      await setChannelPriority(c.channelId as number, DEMOTED_PRIORITY);
+      await updateCreatedChannelPriority(c.channelId as number, DEMOTED_PRIORITY);
+      demoted += 1;
+      await addLog({
+        level: "info",
+        actor: "engine",
+        channelName: prefix,
+        channelId: c.channelId,
+        message: `渠道 ${c.channelName} 站点退化，优先级 ${c.priority}→${DEMOTED_PRIORITY}（腾出优先级配额）`,
+      });
+    } catch (err) {
+      await addLog({
+        level: "error",
+        actor: "engine",
+        channelName: prefix,
+        channelId: c.channelId,
+        message: `渠道 ${c.channelName} 降级失败：${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      });
+    }
+  }
+
+  if (demoted > 0) invalidateChannelCache(prefix);
+  return demoted;
 }
 
 /** 刷新某用户前缀的已建渠道实时缓存（供引擎定时刷新，让管理员列表 key 统计保持新鲜）。 */
