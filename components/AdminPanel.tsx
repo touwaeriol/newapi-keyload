@@ -74,6 +74,8 @@ interface ConfigResponse {
   userUploadLimitCount: number;
   /** 用户默认上传限速窗口（分钟，1~1440） */
   userUploadLimitWindowMinutes: number;
+  /** 是否允许普通用户手动上传（false=只能录入本地库，由引擎自动推站点） */
+  userManualUploadEnabled: boolean;
 }
 
 const DEFAULT_BATCH_SIZE = 20;
@@ -118,6 +120,8 @@ function ConfigCard() {
     DEFAULT_UPLOAD_LIMIT_WINDOW
   );
   const [autoRefill, setAutoRefill] = useState(true);
+  // 全局「禁止用户手动上传」：state 存「是否允许」，UI 展示取反为「禁止」
+  const [manualUploadEnabled, setManualUploadEnabled] = useState(true);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [pinging, setPinging] = useState(false);
@@ -202,6 +206,11 @@ function ConfigCard() {
           : DEFAULT_UPLOAD_LIMIT_WINDOW
       );
       setAutoRefill(Boolean(data.autoRefillEnabled));
+      setManualUploadEnabled(
+        typeof data.userManualUploadEnabled === "boolean"
+          ? data.userManualUploadEnabled
+          : true
+      );
       setPassword("");
     } catch (err) {
       if (!mounted.current) return;
@@ -292,6 +301,7 @@ function ConfigCard() {
           globalUploadLimitWindowMinutes: safeGWindow,
           userUploadLimitCount: safeUCount,
           userUploadLimitWindowMinutes: safeUWindow,
+          userManualUploadEnabled: manualUploadEnabled,
         }),
       });
       toast.success("配置已保存");
@@ -538,6 +548,20 @@ function ConfigCard() {
                   className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-400"
                 />
                 {autoRefill ? "已开启" : "已关闭"}
+              </label>
+            </Field>
+            <Field
+              label="禁止用户手动上传"
+              hint="开启后普通用户不能手动「上传一批 / 直接上传」，只能录入本地库，由引擎自动推站点；管理员代传不受限"
+            >
+              <label className="flex cursor-pointer items-center gap-2 py-2 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={!manualUploadEnabled}
+                  onChange={(e) => setManualUploadEnabled(!e.target.checked)}
+                  className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-400"
+                />
+                {manualUploadEnabled ? "未禁止（用户可手动）" : "已禁止"}
               </label>
             </Field>
           </div>

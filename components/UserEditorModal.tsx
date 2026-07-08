@@ -36,6 +36,9 @@ export function UserEditorModal({
   // 单用户上传限速覆盖（字符串态，空串=跟随全局默认→提交 null）
   const [limitCount, setLimitCount] = useState("");
   const [limitWindow, setLimitWindow] = useState("");
+  // 按用户高优先级配额
+  const [allowHighPriority, setAllowHighPriority] = useState(true);
+  const [highPriorityLimit, setHighPriorityLimit] = useState(""); // 空串=不设独立上限→null
   const [loading, setLoading] = useState(false);
 
   // 保存成功后要展示的完整密钥（新建 / 重置密钥）
@@ -58,6 +61,10 @@ export function UserEditorModal({
       target?.uploadLimitWindowMinutes == null
         ? ""
         : String(target.uploadLimitWindowMinutes)
+    );
+    setAllowHighPriority(target?.allowHighPriority !== false);
+    setHighPriorityLimit(
+      target?.highPriorityLimit == null ? "" : String(target.highPriorityLimit)
     );
     setRegenerateKey(false);
     setRevealed(null);
@@ -97,6 +104,16 @@ export function UserEditorModal({
       }
       uploadLimitWindowMinutes = v;
     }
+    // 独立优先级6数量：空串=null（不设独立上限），否则 ≥0 整数
+    let highPriorityLimitVal: number | null = null;
+    if (highPriorityLimit.trim() !== "") {
+      const v = Math.floor(Number(highPriorityLimit));
+      if (!Number.isFinite(v) || v < 0) {
+        toast.error("独立优先级6数量需为 ≥0 的整数");
+        return;
+      }
+      highPriorityLimitVal = v;
+    }
     setLoading(true);
     try {
       if (isEdit && target) {
@@ -111,6 +128,8 @@ export function UserEditorModal({
               regenerateKey,
               uploadLimitCount,
               uploadLimitWindowMinutes,
+              allowHighPriority,
+              highPriorityLimit: highPriorityLimitVal,
             }),
           }
         );
@@ -269,6 +288,34 @@ export function UserEditorModal({
                 value={limitWindow}
                 onChange={(e) => setLimitWindow(e.target.value)}
                 placeholder="留空=全局默认"
+              />
+            </Field>
+          </div>
+        )}
+
+        {isEdit && (
+          <div className="space-y-3 rounded-lg bg-slate-50 px-3 py-3">
+            <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-600">
+              <input
+                type="checkbox"
+                checked={allowHighPriority}
+                onChange={(e) => setAllowHighPriority(e.target.checked)}
+                className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-400"
+              />
+              可用高优先级（优先级6）渠道
+            </label>
+            <Field
+              label="独立优先级6数量"
+              hint="该用户最多占用几个优先级6渠道（全局6的子上限）；留空=不设独立上限，仅受全局约束"
+            >
+              <TextInput
+                type="number"
+                min={0}
+                max={1000}
+                value={highPriorityLimit}
+                onChange={(e) => setHighPriorityLimit(e.target.value)}
+                placeholder="留空=仅受全局"
+                disabled={!allowHighPriority}
               />
             </Field>
           </div>

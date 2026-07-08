@@ -28,6 +28,7 @@ export async function GET(req: NextRequest) {
       globalUploadLimitWindowMinutes: cfg.globalUploadLimitWindowMinutes,
       userUploadLimitCount: cfg.userUploadLimitCount,
       userUploadLimitWindowMinutes: cfg.userUploadLimitWindowMinutes,
+      userManualUploadEnabled: cfg.userManualUploadEnabled,
     });
   } catch (err) {
     return errorResponse(err);
@@ -56,6 +57,7 @@ export async function PUT(req: NextRequest) {
       globalUploadLimitWindowMinutes?: number;
       userUploadLimitCount?: number;
       userUploadLimitWindowMinutes?: number;
+      userManualUploadEnabled?: boolean;
     };
     const naciBaseUrl = (body.naciBaseUrl ?? "").trim();
     if (!naciBaseUrl) return fail("naciBaseUrl 不能为空");
@@ -126,6 +128,10 @@ export async function PUT(req: NextRequest) {
       body.userUploadLimitWindowMinutes == null
         ? current.userUploadLimitWindowMinutes
         : body.userUploadLimitWindowMinutes;
+    const userManualUploadEnabled =
+      typeof body.userManualUploadEnabled === "boolean"
+        ? body.userManualUploadEnabled
+        : current.userManualUploadEnabled;
 
     await saveConfig({
       naciBaseUrl,
@@ -144,6 +150,7 @@ export async function PUT(req: NextRequest) {
       globalUploadLimitWindowMinutes,
       userUploadLimitCount,
       userUploadLimitWindowMinutes,
+      userManualUploadEnabled,
     });
     // 回读钳制后的最终值返回
     const saved = await getConfig();
@@ -164,6 +171,7 @@ export async function PUT(req: NextRequest) {
       globalUploadLimitWindowMinutes: saved.globalUploadLimitWindowMinutes,
       userUploadLimitCount: saved.userUploadLimitCount,
       userUploadLimitWindowMinutes: saved.userUploadLimitWindowMinutes,
+      userManualUploadEnabled: saved.userManualUploadEnabled,
     });
   } catch (err) {
     return errorResponse(err);

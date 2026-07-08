@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
-import { errorResponse, ok, requireUser } from "@/lib/auth";
+import { errorResponse, fail, ok, requireUser } from "@/lib/auth";
 import { createChannelFromNextBatch } from "@/lib/channelService";
+import { getConfig } from "@/lib/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,6 +11,13 @@ export const dynamic = "force-dynamic";
 export async function POST(req: NextRequest) {
   try {
     const user = await requireUser(req);
+    // 全局开关：禁止普通用户手动上传时，只允许录入本地库（管理员不受限）
+    if (user.role !== "admin") {
+      const cfg = await getConfig();
+      if (!cfg.userManualUploadEnabled) {
+        return fail("管理员已关闭手动上传，key 可正常录入本地库，将由系统自动上传");
+      }
+    }
     const result = await createChannelFromNextBatch(user);
     return ok(result);
   } catch (err) {

@@ -24,6 +24,7 @@ const SEED_PRIORITY_TASK_INTERVAL_MINUTES = 5; // 优先级降级全局定时任
 const SEED_DEMOTE_GRACE_MINUTES = 5; // 僵尸/退化判定宽限期（分钟）
 const SEED_UPLOAD_LIMIT_COUNT = 0; // 上传限速·个数（全局/用户默认共用 seed；0=不限速）
 const SEED_UPLOAD_LIMIT_WINDOW_MINUTES = 10; // 上传限速窗口（分钟，全局/用户默认共用 seed）
+const SEED_USER_MANUAL_UPLOAD_ENABLED = true; // 默认允许用户手动上传
 
 /** 聚合 key 数量合法区间钳制（1~1000，每渠道聚合多少 key） */
 export function clampBatchSize(n: unknown): number {
@@ -151,6 +152,13 @@ async function createTables(pool: Pool): Promise<void> {
   await pool.query(
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS upload_limit_window_minutes integer`
   );
+  // 按用户高优先级配额：是否允许用优先级6（默认允许），及独立数量上限（NULL=不设独立上限）。
+  await pool.query(
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS allow_high_priority boolean NOT NULL DEFAULT true`
+  );
+  await pool.query(
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS high_priority_limit integer`
+  );
   await pool.query(`
     CREATE TABLE IF NOT EXISTS config (
       id int PRIMARY KEY DEFAULT 1,
@@ -207,6 +215,10 @@ async function createTables(pool: Pool): Promise<void> {
   );
   await pool.query(
     `ALTER TABLE config ADD COLUMN IF NOT EXISTS user_upload_limit_window_minutes int NOT NULL DEFAULT 10`
+  );
+  // 全局开关：是否允许普通用户手动上传（false=只能录入本地库，靠引擎自动推站点）。
+  await pool.query(
+    `ALTER TABLE config ADD COLUMN IF NOT EXISTS user_manual_upload_enabled boolean NOT NULL DEFAULT true`
   );
   await pool.query(`
     CREATE TABLE IF NOT EXISTS logs (
@@ -361,6 +373,8 @@ interface UserRow {
   used_quota: string | number | null;
   upload_limit_count: number | null;
   upload_limit_window_minutes: number | null;
+  allow_high_priority: boolean | null;
+  high_priority_limit: number | null;
   created_at: Date | string;
   updated_at: Date | string;
 }
@@ -387,6 +401,10 @@ function rowToUser(r: UserRow): User {
       r.upload_limit_window_minutes == null
         ? null
         : Number(r.upload_limit_window_minutes),
+    allowHighPriority:
+      r.allow_high_priority == null ? true : Boolean(r.allow_high_priority),
+    highPriorityLimit:
+      r.high_priority_limit == null ? null : Number(r.high_priority_limit),
     createdAt: toIso(r.created_at),
     updatedAt: toIso(r.updated_at),
   };
@@ -438,8 +456,8 @@ export async function findUserByChannelName(
 export async function upsertUser(user: User): Promise<void> {
   const pool = await ensureReady();
   await pool.query(
-    `INSERT INTO users (id, username, role, access_key, channel_name, channel_id, upload_limit_count, upload_limit_window_minutes, created_at, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+    `INSERT INTO users (id, username, role, access_key, channel_name, channel_id, upload_limit_count, upload_limit_window_minutes, allow_high_priority, high_priority_limit, created_at, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
      ON CONFLICT (id) DO UPDATE SET
        username = EXCLUDED.username,
        role = EXCLUDED.role,
@@ -448,6 +466,8 @@ export async function upsertUser(user: User): Promise<void> {
        channel_id = EXCLUDED.channel_id,
        upload_limit_count = EXCLUDED.upload_limit_count,
        upload_limit_window_minutes = EXCLUDED.upload_limit_window_minutes,
+       allow_high_priority = EXCLUDED.allow_high_priority,
+       high_priority_limit = EXCLUDED.high_priority_limit,
        created_at = EXCLUDED.created_at,
        updated_at = EXCLUDED.updated_at`,
     [
@@ -459,6 +479,8 @@ export async function upsertUser(user: User): Promise<void> {
       user.channelId,
       user.uploadLimitCount ?? null,
       user.uploadLimitWindowMinutes ?? null,
+      user.allowHighPriority ?? true,
+      user.highPriorityLimit ?? null,
       user.createdAt,
       user.updatedAt,
     ]
@@ -514,8 +536,9 @@ export async function getConfig(): Promise<SystemConfig> {
     global_upload_limit_window_minutes: number;
     user_upload_limit_count: number;
     user_upload_limit_window_minutes: number;
+    user_manual_upload_enabled: boolean;
   }>(
-    "SELECT naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, priority_task_interval_minutes, demote_grace_minutes, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes FROM config WHERE id = 1"
+    "SELECT naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, priority_task_interval_minutes, demote_grace_minutes, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes, user_manual_upload_enabled FROM config WHERE id = 1"
   );
   if (!rows[0]) {
     return {
@@ -535,6 +558,7 @@ export async function getConfig(): Promise<SystemConfig> {
       globalUploadLimitWindowMinutes: SEED_UPLOAD_LIMIT_WINDOW_MINUTES,
       userUploadLimitCount: SEED_UPLOAD_LIMIT_COUNT,
       userUploadLimitWindowMinutes: SEED_UPLOAD_LIMIT_WINDOW_MINUTES,
+      userManualUploadEnabled: SEED_USER_MANUAL_UPLOAD_ENABLED,
     };
   }
   return {
@@ -562,6 +586,7 @@ export async function getConfig(): Promise<SystemConfig> {
     userUploadLimitWindowMinutes: clampUploadLimitWindowMinutes(
       rows[0].user_upload_limit_window_minutes
     ),
+    userManualUploadEnabled: Boolean(rows[0].user_manual_upload_enabled),
   };
 }
 
@@ -569,8 +594,8 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
   const pool = await ensureReady();
   const models = (cfg.models ?? "").trim() || SEED_MODELS;
   await pool.query(
-    `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, priority_task_interval_minutes, demote_grace_minutes, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes)
-     VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+    `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, priority_task_interval_minutes, demote_grace_minutes, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes, user_manual_upload_enabled)
+     VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
      ON CONFLICT (id) DO UPDATE SET
        naci_base_url = EXCLUDED.naci_base_url,
        naci_token = EXCLUDED.naci_token,
@@ -587,7 +612,8 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
        global_upload_limit_count = EXCLUDED.global_upload_limit_count,
        global_upload_limit_window_minutes = EXCLUDED.global_upload_limit_window_minutes,
        user_upload_limit_count = EXCLUDED.user_upload_limit_count,
-       user_upload_limit_window_minutes = EXCLUDED.user_upload_limit_window_minutes`,
+       user_upload_limit_window_minutes = EXCLUDED.user_upload_limit_window_minutes,
+       user_manual_upload_enabled = EXCLUDED.user_manual_upload_enabled`,
     [
       cfg.naciBaseUrl,
       cfg.naciToken ?? "",
@@ -605,6 +631,7 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
       clampUploadLimitWindowMinutes(cfg.globalUploadLimitWindowMinutes),
       clampUploadLimitCount(cfg.userUploadLimitCount),
       clampUploadLimitWindowMinutes(cfg.userUploadLimitWindowMinutes),
+      cfg.userManualUploadEnabled ?? SEED_USER_MANUAL_UPLOAD_ENABLED,
     ]
   );
 }
@@ -1031,6 +1058,20 @@ export async function countChannelsAtPriority(priority: number): Promise<number>
     `SELECT count(*)::int AS count FROM created_channels
      WHERE channel_id IS NOT NULL AND priority = $1`,
     [priority]
+  );
+  return Number(rows[0]?.count ?? 0);
+}
+
+/** 统计某前缀（=用户）已建的、指定优先级的渠道数（供按用户高优先级配额判定）。 */
+export async function countChannelsAtPriorityForPrefix(
+  prefix: string,
+  priority: number
+): Promise<number> {
+  const pool = await ensureReady();
+  const { rows } = await pool.query<{ count: string }>(
+    `SELECT count(*)::int AS count FROM created_channels
+     WHERE channel_id IS NOT NULL AND prefix = $1 AND priority = $2`,
+    [prefix, priority]
   );
   return Number(rows[0]?.count ?? 0);
 }

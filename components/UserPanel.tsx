@@ -125,7 +125,10 @@ export function UserPanel({ user }: { user: SafeUser }) {
         onRefresh={() => fetchChannel(false)}
         onSiteToggle={handleSiteToggle}
       />
-      <UploadCard onUploaded={() => fetchChannel(false)} />
+      <UploadCard
+        onUploaded={() => fetchChannel(false)}
+        manualUploadEnabled={channel?.manualUploadEnabled !== false}
+      />
     </div>
   );
 }
@@ -151,6 +154,7 @@ function ChannelCard({
 }) {
   const toast = useToast();
   const [creating, setCreating] = useState(false);
+  const manualDisabled = channel?.manualUploadEnabled === false;
 
   // 顶部按钮：从本地池取「下一批」新建一个渠道并发布
   async function createBatch() {
@@ -186,7 +190,16 @@ function ChannelCard({
             cachedAt={channel?.cachedAt}
             ttlMs={channel?.cacheTtlMs}
           />
-          <Button onClick={createBatch} loading={creating}>
+          <Button
+            onClick={createBatch}
+            loading={creating}
+            disabled={manualDisabled}
+            title={
+              manualDisabled
+                ? "管理员已关闭手动上传，key 录入本地库后由系统自动上传"
+                : undefined
+            }
+          >
             上传一批（新建渠道）
           </Button>
           <Button variant="secondary" onClick={onRefresh} loading={loading}>
@@ -212,7 +225,13 @@ type UploadCardResult =
   | { mode: "queue"; data: UploadQueueResult }
   | { mode: "direct"; data: DirectUploadResult };
 
-function UploadCard({ onUploaded }: { onUploaded: () => void }) {
+function UploadCard({
+  onUploaded,
+  manualUploadEnabled = true,
+}: {
+  onUploaded: () => void;
+  manualUploadEnabled?: boolean;
+}) {
   const toast = useToast();
   const [text, setText] = useState("");
   const [loading, setLoading] = useState(false);
@@ -289,6 +308,11 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
       subtitle="每行一个 key。提交上传＝先录入本地库，由「上传一批」按钮或定时引擎分批建渠道；直接上传＝录入并立即把待上传的 key 逐批建成新渠道"
     >
       <div className="space-y-3">
+        {!manualUploadEnabled && (
+          <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+            管理员已关闭手动上传：仅可「提交上传」录入本地库，系统会自动分批推送到站点。
+          </p>
+        )}
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
@@ -305,7 +329,12 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
               variant="secondary"
               onClick={submitDirect}
               loading={directLoading}
-              disabled={busy}
+              disabled={busy || !manualUploadEnabled}
+              title={
+                !manualUploadEnabled
+                  ? "管理员已关闭手动上传，请用「提交上传」录入本地库"
+                  : undefined
+              }
             >
               直接上传（建渠道）
             </Button>

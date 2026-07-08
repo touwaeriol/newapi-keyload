@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { errorResponse, fail, ok, requireUser } from "@/lib/auth";
 import { parseKeys } from "@/lib/supplier";
 import { directUploadKeys } from "@/lib/channelService";
+import { getConfig } from "@/lib/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,6 +18,14 @@ export async function POST(req: NextRequest) {
     const raw = Array.isArray(body.keys) ? body.keys.join("\n") : body.keys ?? "";
     const keys = parseKeys(raw);
     if (keys.length === 0) return fail("请提供至少一个 key");
+
+    // 全局开关：禁止普通用户手动上传时，只允许「提交上传（录入本地库）」，此路由拒绝（管理员不受限）
+    if (user.role !== "admin") {
+      const cfg = await getConfig();
+      if (!cfg.userManualUploadEnabled) {
+        return fail("管理员已关闭手动上传，请改用「提交上传」录入本地库，系统会自动上传");
+      }
+    }
 
     const result = await directUploadKeys(user, keys);
     return ok(result);

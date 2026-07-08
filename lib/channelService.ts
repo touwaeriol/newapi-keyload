@@ -26,6 +26,7 @@ import {
   allocateCreatedChannel,
   claimPendingBatch,
   countChannelsAtPriority,
+  countChannelsAtPriorityForPrefix,
   createdChannelIds,
   createdChannelSitesByChannel,
   deleteCreatedChannel,
@@ -46,10 +47,11 @@ import {
   type CreatedChannelSite,
 } from "./store";
 import {
-  consumeBucket,
   effectiveUserLimit,
   GLOBAL_SCOPE,
   peekBucket,
+  releaseBucket,
+  reserveBucket,
   userScope,
 } from "./rateLimit";
 import type { User } from "./types";
@@ -190,28 +192,41 @@ export async function createChannelFromNextBatch(
   if (!prefix) throw new Error("当前用户未配置渠道前缀，无法上传 key");
 
   const cfg = await getConfig();
+  const eff = effectiveUserLimit(user, cfg);
 
-  // —— 上传限速（滚动窗口）：全局桶与用户桶取剩余额度较小者。 ——
-  // 额度耗尽 → 本批不建（引擎下轮/窗口滚动后自动续传）；额度不足一整批 → 允许小批上传（避免限额<聚合数时死锁）。
-  const gUsage = await peekBucket(
+  // —— 上传限速：原子「预占」额度（事前扣，让在途上传即时占住桶，杜绝并发双超额）。 ——
+  // 依次预占全局桶、用户桶（用户只在全局已批额度内再占）；不足一整批 → 允许小批（避免限额<聚合数死锁）。
+  const want = cfg.uploadBatchSize;
+  const g = await reserveBucket(
     GLOBAL_SCOPE,
     cfg.globalUploadLimitCount,
+    want,
     cfg.globalUploadLimitWindowMinutes
   );
-  const eff = effectiveUserLimit(user, cfg);
-  const uUsage = await peekBucket(userScope(user.id), eff.limit, eff.windowMinutes);
-  const gRemain = gUsage.unlimited
-    ? Infinity
-    : Math.max(0, gUsage.limit - gUsage.used);
-  const uRemain = uUsage.unlimited
-    ? Infinity
-    : Math.max(0, uUsage.limit - uUsage.used);
-  const allowance = Math.min(gRemain, uRemain);
-  if (allowance <= 0) {
+  const u = await reserveBucket(
+    userScope(user.id),
+    eff.limit,
+    g.granted,
+    eff.windowMinutes
+  );
+  // 找零①：用户批得比全局少 → 退还全局多占的部分
+  let reservedG = g.members;
+  if (u.granted < g.granted) {
+    const extra = g.members.slice(u.granted);
+    await releaseBucket(GLOBAL_SCOPE, extra);
+    reservedG = g.members.slice(0, u.granted);
+  }
+  let reservedU = u.members;
+  const final = u.granted;
+
+  if (final <= 0) {
+    // 额度耗尽：退还两桶已占（正常为空），记日志，返回 limited
+    await releaseBucket(GLOBAL_SCOPE, reservedG);
+    await releaseBucket(userScope(user.id), reservedU);
     const blocker =
-      gRemain <= uRemain
-        ? `全局已用 ${gUsage.used}/${gUsage.limit}（${gUsage.windowMinutes} 分钟窗口）`
-        : `用户已用 ${uUsage.used}/${uUsage.limit}（${uUsage.windowMinutes} 分钟窗口）`;
+      g.granted <= 0
+        ? `全局限速窗口已满（${cfg.globalUploadLimitWindowMinutes} 分钟内 ${cfg.globalUploadLimitCount} 个）`
+        : `用户限速窗口已满（${eff.windowMinutes} 分钟内 ${eff.limit} 个）`;
     const limitedMessage = `上传限速中：${blocker}，等待窗口滚动后自动续传`;
     const { pending, uploaded } = await poolCounts(prefix);
     if (pending > 0) {
@@ -234,11 +249,17 @@ export async function createChannelFromNextBatch(
   }
 
   // 原子认领：并发（双击 / 双标签页 / kick 撞手动 / admin+user）各自拿到不相交批次
-  const batch = await claimPendingBatch(
-    prefix,
-    Math.min(cfg.uploadBatchSize, allowance)
-  );
-  if (batch.length === 0) {
+  const batch = await claimPendingBatch(prefix, final);
+  // 找零②：池里 pending 少于预占额度 → 退还两桶尾部多占的 (final-actual) 个
+  const actual = batch.length;
+  if (actual < final) {
+    await releaseBucket(GLOBAL_SCOPE, reservedG.slice(actual));
+    await releaseBucket(userScope(user.id), reservedU.slice(actual));
+    reservedG = reservedG.slice(0, actual);
+    reservedU = reservedU.slice(0, actual);
+  }
+  if (actual === 0) {
+    // 池空（非限速）：预占全部退还
     const { pending, uploaded } = await poolCounts(prefix);
     return {
       created: false,
@@ -248,6 +269,11 @@ export async function createChannelFromNextBatch(
       deadKeyCount: null,
     };
   }
+  // 建渠道链路任一步失败时，退还本批预占额度（连同认领与占位行回滚）
+  const releaseReservation = async () => {
+    await releaseBucket(GLOBAL_SCOPE, reservedG);
+    await releaseBucket(userScope(user.id), reservedU);
+  };
   const batchIds = batch.map((b) => b.id);
 
   const cleanKeys = batch.map((b) => b.key);
@@ -260,14 +286,28 @@ export async function createChannelFromNextBatch(
     alloc = await allocateCreatedChannel(prefix);
   } catch (err) {
     await releaseClaim(batchIds);
+    await releaseReservation();
     throw err;
   }
 
-  // 本地检测优先级 6 配额：已建优先级 6 渠道数达到管理员上限 → 直接用优先级 5 创建，
-  // 省去「先试 6 → 服务器报错 → 再试 5」的往返（服务器报错仍作兜底，见下方 catch）。
+  // —— 优先级判定：按用户高优先级配额 + 本地全局配额（省去「先试6→服务器报错→再试5」往返）。 ——
+  // 用户被禁高优先级 → 直接 5；否则若全局优先级6已满 或 用户独立优先级6数量已满 → 5。服务器报错仍作兜底。
+  let desiredPriority = FIXED_PRIORITY;
+  let demoteReason = "";
   const priority6Count = await countChannelsAtPriority(FIXED_PRIORITY);
-  const desiredPriority =
-    priority6Count >= cfg.priority6Limit ? DEMOTED_PRIORITY : FIXED_PRIORITY;
+  if (user.allowHighPriority === false) {
+    desiredPriority = DEMOTED_PRIORITY;
+    demoteReason = "该用户被禁用高优先级";
+  } else if (priority6Count >= cfg.priority6Limit) {
+    desiredPriority = DEMOTED_PRIORITY;
+    demoteReason = `全局优先级 ${FIXED_PRIORITY} 已满（${priority6Count}/${cfg.priority6Limit}）`;
+  } else if (user.highPriorityLimit != null) {
+    const userP6 = await countChannelsAtPriorityForPrefix(prefix, FIXED_PRIORITY);
+    if (userP6 >= user.highPriorityLimit) {
+      desiredPriority = DEMOTED_PRIORITY;
+      demoteReason = `该用户独立优先级 ${FIXED_PRIORITY} 配额已满（${userP6}/${user.highPriorityLimit}）`;
+    }
+  }
 
   let channelId: number;
   let usedPriority = desiredPriority; // 实际使用的优先级
@@ -286,7 +326,7 @@ export async function createChannelFromNextBatch(
           level: "info",
           actor: user.username,
           channelName: alloc.channelName,
-          message: `本地已达优先级 ${FIXED_PRIORITY} 上限（${priority6Count}/${cfg.priority6Limit}），直接用优先级 ${DEMOTED_PRIORITY} 创建`,
+          message: `${demoteReason}，直接用优先级 ${DEMOTED_PRIORITY} 创建`,
         });
       }
     } catch (err) {
@@ -320,22 +360,16 @@ export async function createChannelFromNextBatch(
         remoteChannelName: p.remote_channel_name,
       }));
   } catch (err) {
-    // naci 创建失败：认领退回 pending + 删除占位行（释放序号，下次可复用）
+    // naci 创建失败：认领退回 pending + 删除占位行（释放序号）+ 退还本批预占额度
     await releaseClaim(batchIds);
     await deleteCreatedChannel(alloc.id);
+    await releaseReservation();
     throw err;
   }
 
   // naci 已成功：先把 key 标记已上传（claimed→uploaded），确保后续任一步失败也不会重传本批。
+  // 限速额度已在预占（reserveBucket）时扣除，此处不再计数。
   await markPoolUploaded(batchIds);
-
-  // 限速记账：上传成功才计数（失败不扣额度）。全局桶即使不限速也照常统计，供状态页展示速率。
-  await consumeBucket(
-    GLOBAL_SCOPE,
-    cleanKeys.length,
-    cfg.globalUploadLimitWindowMinutes
-  );
-  await consumeBucket(userScope(user.id), cleanKeys.length, eff.windowMinutes);
 
   // best-effort 回填渠道信息 + 各站远程 id：失败只记 error 不抛（渠道已建成、key 已锁定）。
   try {
@@ -817,6 +851,9 @@ export async function resolveMyChannel(user: User) {
     unlimited: uUsage.unlimited,
     isOverride: eff.isOverride,
   };
+  // 是否允许手动上传（全局开关；管理员不受限，普通用户看全局配置）
+  const manualUploadEnabled =
+    user.role === "admin" ? true : cfg.userManualUploadEnabled;
 
   if (!prefix) {
     return {
@@ -831,6 +868,12 @@ export async function resolveMyChannel(user: User) {
       uploadBatchSize,
       autoRefillEnabled,
       uploadLimit,
+      manualUploadEnabled,
+      highPriority: {
+        allowed: user.allowHighPriority !== false,
+        limit: user.highPriorityLimit ?? null,
+        used: 0,
+      },
       nextCheckAt,
       checking,
       lastCheck,
@@ -843,6 +886,11 @@ export async function resolveMyChannel(user: User) {
   const { pending: poolPending, uploaded: poolUploaded } =
     await poolCounts(prefix);
   const rt = await getPrefixRealtimeCached(user);
+  // 该用户已建的优先级6渠道数（供「高优先级 已用/上限」展示）
+  const highPriorityUsed = await countChannelsAtPriorityForPrefix(
+    prefix,
+    FIXED_PRIORITY
+  );
 
   return {
     exists: rt.channels.length > 0,
@@ -856,6 +904,12 @@ export async function resolveMyChannel(user: User) {
     uploadBatchSize,
     autoRefillEnabled,
     uploadLimit,
+    manualUploadEnabled,
+    highPriority: {
+      allowed: user.allowHighPriority !== false,
+      limit: user.highPriorityLimit ?? null,
+      used: highPriorityUsed,
+    },
     nextCheckAt,
     checking,
     lastCheck,

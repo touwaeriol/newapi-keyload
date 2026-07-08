@@ -23,6 +23,10 @@ export interface User {
   uploadLimitCount?: number | null;
   /** 单用户上传限速·窗口分钟覆盖（NULL=跟随全局默认） */
   uploadLimitWindowMinutes?: number | null;
+  /** 是否允许该用户使用高优先级（优先级6）渠道（默认 true）。false=其新渠道一律优先级5 */
+  allowHighPriority?: boolean;
+  /** 该用户可占用的优先级6渠道数量上限（全局6的子上限；NULL=不设独立上限，仅受全局约束） */
+  highPriorityLimit?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -69,6 +73,8 @@ export interface SystemConfig {
   userUploadLimitCount: number;
   /** 用户默认上传限速窗口（分钟，1~1440；可被单用户覆盖） */
   userUploadLimitWindowMinutes: number;
+  /** 是否允许普通用户手动上传（「上传一批」「直接上传」）。false=只能录入本地库，由引擎自动推站点 */
+  userManualUploadEnabled: boolean;
 }
 
 export type LogLevel = "info" | "success" | "warn" | "error";

@@ -30,6 +30,10 @@ export async function PUT(
       /** 单用户上传限速覆盖：数字=覆盖（个数 0=不限速），显式 null=清除回全局默认，未传=不动 */
       uploadLimitCount?: number | null;
       uploadLimitWindowMinutes?: number | null;
+      /** 是否允许高优先级渠道；未传=不动 */
+      allowHighPriority?: boolean;
+      /** 独立优先级6数量上限：数字=设定（≥0），显式 null=清除（仅受全局），未传=不动 */
+      highPriorityLimit?: number | null;
     };
 
     if (typeof body.username === "string") {
@@ -89,6 +93,22 @@ export async function PUT(
           return fail("上传限速·窗口需为 1~1440 分钟");
         }
         target.uploadLimitWindowMinutes = v;
+      }
+    }
+
+    // 按用户高优先级配额
+    if (typeof body.allowHighPriority === "boolean") {
+      target.allowHighPriority = body.allowHighPriority;
+    }
+    if ("highPriorityLimit" in body) {
+      if (body.highPriorityLimit == null) {
+        target.highPriorityLimit = null;
+      } else {
+        const v = Math.floor(Number(body.highPriorityLimit));
+        if (!Number.isFinite(v) || v < 0) {
+          return fail("独立优先级6数量需为 ≥0 的整数");
+        }
+        target.highPriorityLimit = Math.min(v, 1000);
       }
     }
 

@@ -77,6 +77,16 @@ export interface ChannelStatus {
     /** 是否为单用户自定义限速（而非全局默认） */
     isOverride: boolean;
   } | null;
+  /** 是否允许手动上传（全局开关；false=只能录入，靠引擎自动推站点） */
+  manualUploadEnabled?: boolean;
+  /** 高优先级配额状态 */
+  highPriority?: {
+    allowed: boolean;
+    /** 独立上限（null=仅受全局约束） */
+    limit: number | null;
+    /** 该用户已建的优先级6渠道数 */
+    used: number;
+  } | null;
   /** 下一次定时检查时间（ISO 字符串） */
   nextCheckAt?: string | null;
   /** 定时引擎当前是否正在检查 */
@@ -414,12 +424,26 @@ function UploadProgress({ channel }: { channel: ChannelStatus }) {
   const exhausted = isExhausted(channel);
   const limit = channel.uploadLimit;
   const limitedNow = limit != null && !limit.unlimited && limit.used >= limit.limit;
+  const hp = channel.highPriority;
 
   return (
     <div className="rounded-xl border border-brand-100 bg-brand-50/50 p-4">
       <div className="mb-3 flex items-center justify-between gap-2">
         <h4 className="text-sm font-semibold text-slate-800">上传进度</h4>
         <div className="flex flex-wrap items-center justify-end gap-2">
+          {channel.manualUploadEnabled === false && (
+            <Badge tone="amber">已禁手动上传 · 系统自动上</Badge>
+          )}
+          {hp != null &&
+            (!hp.allowed ? (
+              <Badge tone="slate">不可用高优先级</Badge>
+            ) : hp.limit != null ? (
+              <Badge tone={hp.used >= hp.limit ? "rose" : "blue"}>
+                高优先级 {hp.used}/{hp.limit}
+              </Badge>
+            ) : (
+              <Badge tone="blue">高优先级 已用 {hp.used}</Badge>
+            ))}
           {limit != null &&
             (limit.unlimited ? (
               <Badge tone="slate">上传不限速</Badge>

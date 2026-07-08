@@ -57,10 +57,10 @@ function getRedis(): Redis | null {
   return g.__keyloadRedis;
 }
 
-// —— 内存桶（降级用；{ts,n} 条目按窗口裁剪） ——
+// —— 内存桶（降级用；逐条 {ts,id}，便于按 member 精确释放/找零） ——
 interface MemEntry {
   ts: number;
-  n: number;
+  id: string;
 }
 
 function memStore(): Map<string, MemEntry[]> {
@@ -69,20 +69,49 @@ function memStore(): Map<string, MemEntry[]> {
   return g.__keyloadRateMem;
 }
 
-function memCount(scope: string, windowMs: number): number {
+/** 裁掉窗口外条目并回写，返回该 scope 存活条目列表。 */
+function memPrune(scope: string, windowMs: number): MemEntry[] {
   const store = memStore();
   const cutoff = Date.now() - windowMs;
   const list = (store.get(scope) ?? []).filter((e) => e.ts > cutoff);
   if (list.length > 0) store.set(scope, list);
   else store.delete(scope);
-  return list.reduce((sum, e) => sum + e.n, 0);
+  return list;
 }
 
-function memAdd(scope: string, n: number): void {
+function memCount(scope: string, windowMs: number): number {
+  return memPrune(scope, windowMs).length;
+}
+
+/** 内存桶原子预占（单进程，无并发交错）：返回实际占到的数量与 member id 列表。 */
+function memReserve(
+  scope: string,
+  limit: number,
+  want: number,
+  windowMs: number
+): { granted: number; members: string[] } {
+  const list = memPrune(scope, windowMs);
+  const granted = limit <= 0 ? want : Math.max(0, Math.min(want, limit - list.length));
+  if (granted <= 0) return { granted: 0, members: [] };
+  const now = Date.now();
+  const rand = crypto.randomBytes(6).toString("hex");
+  const members: string[] = [];
+  for (let i = 0; i < granted; i++) {
+    const id = `${now}:${rand}:${i}`;
+    list.push({ ts: now, id });
+    members.push(id);
+  }
+  memStore().set(scope, list);
+  return { granted, members };
+}
+
+function memRelease(scope: string, members: string[]): void {
+  if (members.length === 0) return;
   const store = memStore();
-  const list = store.get(scope) ?? [];
-  list.push({ ts: Date.now(), n });
-  store.set(scope, list);
+  const drop = new Set(members);
+  const list = (store.get(scope) ?? []).filter((e) => !drop.has(e.id));
+  if (list.length > 0) store.set(scope, list);
+  else store.delete(scope);
 }
 
 // —— 后端切换记录（只在 redis↔memory 切换瞬间各记一条日志） ——
@@ -107,16 +136,59 @@ async function redisCount(r: Redis, scope: string, windowMs: number): Promise<nu
   return r.zcard(key);
 }
 
-async function redisAdd(r: Redis, scope: string, n: number, windowMs: number): Promise<void> {
-  const key = KEY_PREFIX + scope;
+// 原子预占 Lua：清窗口外 → 统计 → 计算可占 granted → 逐个 ZADD → PEXPIRE → 返回占用的 member 列表。
+// KEYS[1]=zset；ARGV: now, windowMs, want, limit, cutoff, rand。limit<=0 表示不限速（仍按 want 预占计数）。
+const RESERVE_LUA = `
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local windowMs = tonumber(ARGV[2])
+local want = tonumber(ARGV[3])
+local limit = tonumber(ARGV[4])
+local cutoff = tonumber(ARGV[5])
+local rand = ARGV[6]
+redis.call('ZREMRANGEBYSCORE', key, 0, cutoff)
+local count = redis.call('ZCARD', key)
+local granted
+if limit <= 0 then
+  granted = want
+else
+  local room = limit - count
+  if room < 0 then room = 0 end
+  granted = math.min(want, room)
+end
+local members = {}
+for i = 1, granted do
+  local m = now .. ':' .. rand .. ':' .. i
+  redis.call('ZADD', key, now, m)
+  members[i] = m
+end
+if granted > 0 then
+  redis.call('PEXPIRE', key, windowMs + 60000)
+end
+return members
+`;
+
+async function redisReserve(
+  r: Redis,
+  scope: string,
+  limit: number,
+  want: number,
+  windowMs: number
+): Promise<{ granted: number; members: string[] }> {
   const now = Date.now();
   const rand = crypto.randomBytes(6).toString("hex");
-  const args: (string | number)[] = [];
-  for (let i = 0; i < n; i++) {
-    args.push(now, `${now}:${rand}:${i}`); // score, member 成对
-  }
-  await r.zadd(key, ...args);
-  await r.pexpire(key, windowMs + 60_000); // 窗口后兜底清 key
+  const members = (await r.eval(
+    RESERVE_LUA,
+    1,
+    KEY_PREFIX + scope,
+    String(now),
+    String(windowMs),
+    String(want),
+    String(limit),
+    String(now - windowMs),
+    rand
+  )) as string[];
+  return { granted: members.length, members };
 }
 
 /** 读取某 scope 当前窗口用量（limit=0 视为不限速，但 used 照常统计，供状态展示） */
@@ -143,25 +215,46 @@ export async function peekBucket(
   return { used, limit, windowMinutes, unlimited: limit <= 0 };
 }
 
-/** 上传成功后记账：向 scope 写入 n 个计数（窗口滚动后自动失效） */
-export async function consumeBucket(
+/**
+ * 原子预占 want 个额度（上传前调用）：返回实际占到的 granted（≤want）与 member 列表。
+ * 因是「事前预占」，桶用量即时反映在途上传，并发下别的上传只能看到剩余额度 → 实现「占桶」语义。
+ * 建渠道失败 / 池不足 / 多桶找零 时，用返回的 members 调 releaseBucket 退还。
+ */
+export async function reserveBucket(
   scope: string,
-  n: number,
+  limit: number,
+  want: number,
   windowMinutes: number,
-): Promise<void> {
-  if (n <= 0) return;
+): Promise<{ granted: number; members: string[] }> {
+  if (want <= 0) return { granted: 0, members: [] };
   const windowMs = Math.max(1, windowMinutes) * 60_000;
   const r = getRedis();
   if (r) {
     try {
-      await redisAdd(r, scope, n, windowMs);
+      const res = await redisReserve(r, scope, limit, want, windowMs);
       noteBackend("redis");
-      return;
+      return res;
     } catch (err) {
       noteBackend("memory", err);
     }
   } else {
     noteBackend("memory");
   }
-  memAdd(scope, n);
+  return memReserve(scope, limit, want, windowMs);
+}
+
+/** 退还此前预占的额度（回滚 / 找零）。members 为 reserveBucket 返回的成员子集。 */
+export async function releaseBucket(scope: string, members: string[]): Promise<void> {
+  if (members.length === 0) return;
+  const r = getRedis();
+  if (r) {
+    try {
+      await r.zrem(KEY_PREFIX + scope, ...members);
+      noteBackend("redis");
+      return;
+    } catch (err) {
+      noteBackend("memory", err);
+    }
+  }
+  memRelease(scope, members);
 }
