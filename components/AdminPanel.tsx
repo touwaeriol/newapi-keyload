@@ -640,10 +640,16 @@ interface UploadLimitUserRow extends UploadLimitUsage {
   channelName: string;
   /** 是否为单用户自定义限速（而非全局默认） */
   isOverride: boolean;
+  /** 高优先级配额：是否允许 / 已用 / 独立上限（null=仅受全局） */
+  hpAllowed: boolean;
+  hpUsed: number;
+  hpLimit: number | null;
 }
 
 interface UploadLimitResponse {
   global: UploadLimitUsage;
+  /** 全局高优先级(优先级6)配额：已用 / 上限 */
+  highPriorityGlobal: { used: number; limit: number };
   users: UploadLimitUserRow[];
 }
 
@@ -662,6 +668,13 @@ function usageTone(u: UploadLimitUsage): "slate" | "green" | "amber" | "rose" {
   if (u.used >= u.limit) return "rose";
   if (u.used >= u.limit * 0.8) return "amber";
   return "green";
+}
+
+/** 高优先级配额徽章色：满=红、接近（≥80%）=黄、正常=蓝。 */
+function hpTone(used: number, limit: number): "blue" | "amber" | "rose" {
+  if (limit > 0 && used >= limit) return "rose";
+  if (limit > 0 && used >= limit * 0.8) return "amber";
+  return "blue";
 }
 
 function UploadLimitCard() {
@@ -692,30 +705,45 @@ function UploadLimitCard() {
 
   return (
     <Card
-      title="上传限速状态"
-      subtitle="滚动窗口实时用量（15 秒自动刷新）；限速值在上方系统配置中调整"
+      title="上传限速 / 高优先级配额状态"
+      subtitle="滚动窗口限速用量与优先级6渠道配额（15 秒自动刷新）；阈值在上方系统配置 / 编辑用户中调整"
     >
       {loading && !data ? (
         <LoadingRow />
       ) : !data ? (
-        <EmptyRow text="读取限速状态失败" />
+        <EmptyRow text="读取状态失败" />
       ) : (
         <div className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm">
-            <span className="font-medium text-slate-700">全局</span>
-            <Badge tone={usageTone(data.global)}>{usageText(data.global)}</Badge>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg bg-slate-50 px-3 py-2 text-sm">
+            <span className="flex items-center gap-2">
+              <span className="font-medium text-slate-700">全局限速</span>
+              <Badge tone={usageTone(data.global)}>{usageText(data.global)}</Badge>
+            </span>
+            <span className="flex items-center gap-2">
+              <span className="font-medium text-slate-700">全局高优先级</span>
+              <Badge
+                tone={hpTone(
+                  data.highPriorityGlobal.used,
+                  data.highPriorityGlobal.limit
+                )}
+              >
+                已用 {data.highPriorityGlobal.used} / {data.highPriorityGlobal.limit}{" "}
+                个优先级6
+              </Badge>
+            </span>
           </div>
           {data.users.length === 0 ? (
             <EmptyRow text="暂无用户" />
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[560px] text-left text-sm">
+              <table className="w-full min-w-[680px] text-left text-sm">
                 <thead>
                   <tr className="border-b border-slate-200 text-xs text-slate-400">
                     <th className="py-2 pr-3 font-medium">用户名</th>
                     <th className="py-2 pr-3 font-medium">渠道前缀</th>
                     <th className="py-2 pr-3 font-medium">窗口用量</th>
                     <th className="py-2 pr-3 font-medium">限速来源</th>
+                    <th className="py-2 pr-3 font-medium">高优先级配额</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -733,6 +761,17 @@ function UploadLimitCard() {
                           <Badge tone="blue">自定义</Badge>
                         ) : (
                           <Badge tone="slate">全局默认</Badge>
+                        )}
+                      </td>
+                      <td className="py-2 pr-3">
+                        {!u.hpAllowed ? (
+                          <Badge tone="slate">不可用</Badge>
+                        ) : u.hpLimit != null ? (
+                          <Badge tone={hpTone(u.hpUsed, u.hpLimit)}>
+                            已用 {u.hpUsed} / {u.hpLimit}
+                          </Badge>
+                        ) : (
+                          <Badge tone="blue">已用 {u.hpUsed} · 仅受全局</Badge>
                         )}
                       </td>
                     </tr>
