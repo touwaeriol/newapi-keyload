@@ -35,7 +35,7 @@ import {
   upsertUser,
   type CreatedChannelSite,
 } from "./store";
-import type { KeyStats, User } from "./types";
+import type { User } from "./types";
 
 /** 单前缀单次「逐批建渠道」最多新建的渠道数（防一次 paste 太多把 naci 打爆）。引擎与直传共用。 */
 export const MAX_CHANNELS_PER_DRAIN = 20;
@@ -192,6 +192,7 @@ export async function createChannelFromNextBatch(
   try {
     const created = await createChannel({ name: alloc.channelName, keyText });
     channelId = created.id;
+    // 建渠道即已发布并自动启用站点调度，无需再调 reenableAllSites（旧「手动打开调度」逻辑已移除）。
     // 各站远程渠道 id（publish_results）→ 落库入参（只留拿到 remote id 的站）
     publishSites = created.publishResults
       .filter((p) => p.remote_channel_id > 0)
@@ -206,15 +207,6 @@ export async function createChannelFromNextBatch(
     await deleteCreatedChannel(alloc.id);
     throw err;
   }
-
-  // 新建渠道即已启用发布（status:1 + publish_results 均 created），**无需再打开站点调度**。
-  // 旧的 reenableAllSites 是给「append 到旧渠道、渠道会自动禁用需重开」用的，新模型不需要。
-  // 平台 key 统计乐观置为本批数量（刚上传、全存活），随后由 status-batch 实时刷新校正。
-  const keyStats: KeyStats = {
-    platformKeyCount: cleanKeys.length,
-    deadKeyCount: 0,
-    statusList: [],
-  };
 
   // naci 已成功：先把 key 标记已上传（claimed→uploaded），确保后续任一步失败也不会重传本批。
   await markPoolUploaded(batchIds);
@@ -242,18 +234,12 @@ export async function createChannelFromNextBatch(
 
   const uploadedKeyCount = await recordUploadedKeys(prefix, cleanKeys);
 
-  // 回写用户 channelId=最新渠道 + key 统计缓存
+  // 回写用户 channelId=最新渠道（key 统计由实时视图 status-batch 刷新，不在建渠道时取）
   await upsertUser({
     ...user,
     channelId,
     updatedAt: new Date().toISOString(),
   });
-  if (keyStats) {
-    await updateUserKeyStats(user.id, {
-      platformKeyCount: keyStats.platformKeyCount,
-      deadKeyCount: keyStats.deadKeyCount,
-    });
-  }
 
   invalidateChannelCache(prefix);
 
@@ -262,11 +248,7 @@ export async function createChannelFromNextBatch(
     actor: user.username,
     channelName: alloc.channelName,
     channelId,
-    message: `新建渠道 ${alloc.channelName} 并上传 ${cleanKeys.length} 个 key（累计 ${uploadedKeyCount}${
-      keyStats
-        ? `，平台 ${keyStats.platformKeyCount} 个/禁用 ${keyStats.deadKeyCount}`
-        : ""
-    }）`,
+    message: `新建渠道 ${alloc.channelName} 并上传 ${cleanKeys.length} 个 key（累计 ${uploadedKeyCount}）`,
   });
 
   const { pending, uploaded } = await poolCounts(prefix);
@@ -278,8 +260,8 @@ export async function createChannelFromNextBatch(
     uploadedKeyCount,
     poolPending: pending,
     poolUploaded: uploaded,
-    platformKeyCount: keyStats?.platformKeyCount ?? null,
-    deadKeyCount: keyStats?.deadKeyCount ?? null,
+    platformKeyCount: null,
+    deadKeyCount: null,
   };
 }
 
