@@ -183,25 +183,18 @@ export interface CreateBatchResult {
 
 /**
  * 「仅高优先级」模式名额门控：返回不可建的原因串（无空闲优先级6名额），有名额则返回 null。
- * 全局名额（priority6Limit）+ 单用户权限/独立配额都要满足。依赖 countChannelsAtPriority(6) 准确（已由对账保证）。
+ *
+ * **统一优先级**：所有用户同等对待，只受**全局**高优先级名额（priority6Limit）门控，
+ * 不再区分每用户的高优先级权限(allowHighPriority)/独立配额(highPriorityLimit)——那两项仅在非本模式下生效。
+ * 各用户之间的公平由定时任务的轮转分配器（最少者优先）保证，而非在此按用户配额限制。
+ * 依赖 countChannelsAtPriority(6) 准确（已由对账保证）。
  */
 async function highPrioritySlotBlock(
-  user: User,
-  cfg: Awaited<ReturnType<typeof getConfig>>,
-  prefix: string
+  cfg: Awaited<ReturnType<typeof getConfig>>
 ): Promise<string | null> {
-  if (user.allowHighPriority === false) {
-    return "仅高优先级模式：该用户未获高优先级权限，key 留池等待";
-  }
   const g6 = await countChannelsAtPriority(FIXED_PRIORITY);
   if (g6 >= cfg.priority6Limit) {
     return `仅高优先级模式：全局高优先级已满（${g6}/${cfg.priority6Limit}），等待名额回收`;
-  }
-  if (user.highPriorityLimit != null) {
-    const u6 = await countChannelsAtPriorityForPrefix(prefix, FIXED_PRIORITY);
-    if (u6 >= user.highPriorityLimit) {
-      return `仅高优先级模式：该用户高优先级配额已满（${u6}/${user.highPriorityLimit}），等待名额回收`;
-    }
   }
   return null;
 }
@@ -246,7 +239,7 @@ export async function createChannelFromNextBatch(
       };
     }
     // 无空闲优先级6名额则不建（不认领、不占限速额度），key 留池等回收。
-    const block = await highPrioritySlotBlock(user, cfg, prefix);
+    const block = await highPrioritySlotBlock(cfg);
     if (block) {
       const { pending, uploaded } = await poolCounts(prefix);
       return {
