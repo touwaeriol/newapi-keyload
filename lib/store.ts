@@ -25,6 +25,7 @@ const SEED_DEMOTE_GRACE_MINUTES = 5; // 僵尸/退化判定宽限期（分钟）
 const SEED_UPLOAD_LIMIT_COUNT = 0; // 上传限速·个数（全局/用户默认共用 seed；0=不限速）
 const SEED_UPLOAD_LIMIT_WINDOW_MINUTES = 10; // 上传限速窗口（分钟，全局/用户默认共用 seed）
 const SEED_USER_MANUAL_UPLOAD_ENABLED = true; // 默认允许用户手动上传
+const SEED_ONLY_HIGH_PRIORITY_ENABLED = false; // 默认关闭「仅使用高优先级渠道」模式
 
 /** 聚合 key 数量合法区间钳制（1~1000，每渠道聚合多少 key） */
 export function clampBatchSize(n: unknown): number {
@@ -219,6 +220,10 @@ async function createTables(pool: Pool): Promise<void> {
   // 全局开关：是否允许普通用户手动上传（false=只能录入本地库，靠引擎自动推站点）。
   await pool.query(
     `ALTER TABLE config ADD COLUMN IF NOT EXISTS user_manual_upload_enabled boolean NOT NULL DEFAULT true`
+  );
+  // 全局开关：仅使用高优先级渠道（只在有空闲优先级6名额时建渠道，不降级到5）。
+  await pool.query(
+    `ALTER TABLE config ADD COLUMN IF NOT EXISTS only_high_priority_enabled boolean NOT NULL DEFAULT false`
   );
   await pool.query(`
     CREATE TABLE IF NOT EXISTS logs (
@@ -537,8 +542,9 @@ export async function getConfig(): Promise<SystemConfig> {
     user_upload_limit_count: number;
     user_upload_limit_window_minutes: number;
     user_manual_upload_enabled: boolean;
+    only_high_priority_enabled: boolean;
   }>(
-    "SELECT naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, priority_task_interval_minutes, demote_grace_minutes, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes, user_manual_upload_enabled FROM config WHERE id = 1"
+    "SELECT naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, priority_task_interval_minutes, demote_grace_minutes, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes, user_manual_upload_enabled, only_high_priority_enabled FROM config WHERE id = 1"
   );
   if (!rows[0]) {
     return {
@@ -559,6 +565,7 @@ export async function getConfig(): Promise<SystemConfig> {
       userUploadLimitCount: SEED_UPLOAD_LIMIT_COUNT,
       userUploadLimitWindowMinutes: SEED_UPLOAD_LIMIT_WINDOW_MINUTES,
       userManualUploadEnabled: SEED_USER_MANUAL_UPLOAD_ENABLED,
+      onlyHighPriorityEnabled: SEED_ONLY_HIGH_PRIORITY_ENABLED,
     };
   }
   return {
@@ -587,6 +594,7 @@ export async function getConfig(): Promise<SystemConfig> {
       rows[0].user_upload_limit_window_minutes
     ),
     userManualUploadEnabled: Boolean(rows[0].user_manual_upload_enabled),
+    onlyHighPriorityEnabled: Boolean(rows[0].only_high_priority_enabled),
   };
 }
 
@@ -594,8 +602,8 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
   const pool = await ensureReady();
   const models = (cfg.models ?? "").trim() || SEED_MODELS;
   await pool.query(
-    `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, priority_task_interval_minutes, demote_grace_minutes, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes, user_manual_upload_enabled)
-     VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+    `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, priority_task_interval_minutes, demote_grace_minutes, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes, user_manual_upload_enabled, only_high_priority_enabled)
+     VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
      ON CONFLICT (id) DO UPDATE SET
        naci_base_url = EXCLUDED.naci_base_url,
        naci_token = EXCLUDED.naci_token,
@@ -613,7 +621,8 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
        global_upload_limit_window_minutes = EXCLUDED.global_upload_limit_window_minutes,
        user_upload_limit_count = EXCLUDED.user_upload_limit_count,
        user_upload_limit_window_minutes = EXCLUDED.user_upload_limit_window_minutes,
-       user_manual_upload_enabled = EXCLUDED.user_manual_upload_enabled`,
+       user_manual_upload_enabled = EXCLUDED.user_manual_upload_enabled,
+       only_high_priority_enabled = EXCLUDED.only_high_priority_enabled`,
     [
       cfg.naciBaseUrl,
       cfg.naciToken ?? "",
@@ -632,6 +641,7 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
       clampUploadLimitCount(cfg.userUploadLimitCount),
       clampUploadLimitWindowMinutes(cfg.userUploadLimitWindowMinutes),
       cfg.userManualUploadEnabled ?? SEED_USER_MANUAL_UPLOAD_ENABLED,
+      cfg.onlyHighPriorityEnabled ?? SEED_ONLY_HIGH_PRIORITY_ENABLED,
     ]
   );
 }

@@ -79,6 +79,8 @@ export interface ChannelStatus {
   } | null;
   /** 是否允许手动上传（全局开关；false=只能录入，靠引擎自动推站点） */
   manualUploadEnabled?: boolean;
+  /** 是否「仅使用高优先级渠道」模式（名额满时 key 留池等回收） */
+  onlyHighPriority?: boolean;
   /** 高优先级配额状态 */
   highPriority?: {
     allowed: boolean;
@@ -450,6 +452,9 @@ function UploadProgress({ channel }: { channel: ChannelStatus }) {
       <div className="mb-3 flex items-center justify-between gap-2">
         <h4 className="text-sm font-semibold text-slate-800">上传进度</h4>
         <div className="flex flex-wrap items-center justify-end gap-2">
+          {channel.onlyHighPriority && (
+            <Badge tone="amber">仅高优先级模式</Badge>
+          )}
           {channel.manualUploadEnabled === false && (
             <Badge tone="amber">已禁手动上传 · 系统自动上</Badge>
           )}
@@ -632,6 +637,7 @@ function statusDot(status: string): string {
       return "bg-emerald-500";
     case "paused":
     case "limited":
+    case "waiting":
       return "bg-amber-500";
     case "empty":
       return "bg-slate-400";

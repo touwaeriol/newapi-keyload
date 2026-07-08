@@ -6,6 +6,7 @@
 // 单例守卫挂 globalThis，兼容 Next dev 热重载 / standalone 多次 import，避免重复启动定时器。
 // 引擎内任何异常都被捕获，绝不让 tick 抛出而中断定时器或 crash 进程。
 import {
+  createChannelFromNextBatch,
   createChannelsDrain,
   demoteAllDegradedChannels,
   reconcileTrackedPriorities,
@@ -35,7 +36,7 @@ const CLAIM_STALE_MINUTES = 10;
 /** 单前缀最近一次检查结果（供前端展示「上次检查做了什么/结果如何」）。 */
 export interface LastCheckResult {
   at: number; // 检查完成时间戳(ms)
-  status: "created" | "empty" | "paused" | "limited" | "error";
+  status: "created" | "empty" | "paused" | "limited" | "waiting" | "error";
   message: string; // 人类可读的结果/执行说明
 }
 
@@ -194,6 +195,66 @@ async function processPrefix(
   }
 }
 
+/** 轮转分配器单轮硬上限（安全阀，防极端情况死循环）。 */
+const RR_HARD_CAP = 5000;
+
+/**
+ * 「仅高优先级」模式的公平分配器：把空闲优先级6名额按**轮转**分给有待上传的各前缀
+ *（每轮每个前缀各建 1 个渠道），直到名额用尽 / 各前缀池空 / 用户配额满。
+ * 依赖 createChannelFromNextBatch 内部名额门控：无名额时返回 waitingSlot，本前缀退出轮转；
+ * 全局名额耗尽时所有前缀下一轮都 waitingSlot → active 清空、循环结束。返回本次建成的渠道数。
+ */
+async function distributeHighPriorityRoundRobin(): Promise<number> {
+  const prefixes = await channelsWithPending();
+  const active: { prefix: string; user: Awaited<ReturnType<typeof findUserByChannelName>> }[] =
+    [];
+  for (const p of prefixes) {
+    const user = await findUserByChannelName(p);
+    if (user) active.push({ prefix: p, user });
+    else recordResult(p, "empty", "无绑定用户，跳过");
+  }
+  let built = 0;
+  let guard = 0;
+  while (active.length > 0 && guard++ < RR_HARD_CAP) {
+    let progressed = false;
+    for (const entry of [...active]) {
+      let r;
+      try {
+        r = await createChannelFromNextBatch(entry.user!);
+      } catch (err) {
+        recordResult(
+          entry.prefix,
+          "error",
+          `处理失败：${err instanceof Error ? err.message : String(err)}`
+        );
+        const idx = active.indexOf(entry);
+        if (idx >= 0) active.splice(idx, 1);
+        continue;
+      }
+      if (r.created) {
+        built += 1;
+        progressed = true;
+        recordResult(
+          entry.prefix,
+          "created",
+          `自动新建高优先级渠道 ${r.channelName}（本批 ${r.keyCount} 个，剩余待上传 ${r.poolPending}）`
+        );
+      } else {
+        // waitingSlot（名额满/用户配额满）或 池空 → 退出本前缀轮转
+        recordResult(
+          entry.prefix,
+          r.waitingSlot ? "waiting" : "empty",
+          r.waitingMessage ?? "队列已空，等待新 key"
+        );
+        const idx = active.indexOf(entry);
+        if (idx >= 0) active.splice(idx, 1);
+      }
+    }
+    if (!progressed) break; // 一整轮没建成（名额用尽/池都空）→ 结束
+  }
+  return built;
+}
+
 /**
  * 单次调度：遍历「有 pending 的前缀」∪「已建过渠道的前缀」，逐个（串行）processPrefix。
  * isRunning 防重入。
@@ -221,6 +282,18 @@ export async function tick(): Promise<void> {
       }
     } catch (err) {
       console.error("[engine] reclaimStaleClaimed 失败:", err);
+    }
+
+    // 「仅高优先级」模式：用轮转分配器公平分配空闲名额，再刷新已建渠道缓存；
+    // 否则走原有「每前缀 drain 到底」逻辑。
+    if (cfg.onlyHighPriorityEnabled && autoRefill) {
+      await distributeHighPriorityRoundRobin();
+      // 刷新有已建渠道的前缀缓存（保持管理端统计新鲜）
+      for (const prefix of await prefixesWithCreatedChannels()) {
+        const user = await findUserByChannelName(prefix);
+        if (user) await refreshPrefixRealtime(user);
+      }
+      return;
     }
 
     const pendingPrefixes = await channelsWithPending();
@@ -310,6 +383,21 @@ async function runPriorityTask(): Promise<void> {
         undefined,
         `优先级任务：本轮降级 ${demoted} 个退化渠道（6→5，腾出优先级配额）`
       );
+      // 仅高优先级模式：刚回收了名额 → 立即把池里等待的 key 补进空出的名额，无需等下一个补给间隔。
+      if (cfg.onlyHighPriorityEnabled && cfg.autoRefillEnabled) {
+        try {
+          const built = await distributeHighPriorityRoundRobin();
+          if (built > 0) {
+            await safeLog(
+              "info",
+              undefined,
+              `优先级任务：回收后立即补建 ${built} 个高优先级渠道`
+            );
+          }
+        } catch (err) {
+          console.error("[engine] 回收后补建失败:", err);
+        }
+      }
     }
   } catch (err) {
     console.error("[engine] 优先级降级任务失败:", err);

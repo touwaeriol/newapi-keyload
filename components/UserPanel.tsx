@@ -35,6 +35,9 @@ interface CreateBatchResult {
   /** 是否因上传限速被拦下 */
   limited?: boolean;
   limitedMessage?: string;
+  /** 是否因「仅高优先级」无空闲名额被拦下 */
+  waitingSlot?: boolean;
+  waitingMessage?: string;
   poolPending: number;
   poolUploaded: number;
 }
@@ -169,6 +172,8 @@ function ChannelCard({
         );
       } else if (res.limited) {
         toast.error(res.limitedMessage ?? "上传限速中，请稍后再试");
+      } else if (res.waitingSlot) {
+        toast.info(res.waitingMessage ?? "仅高优先级模式：暂无空闲名额，key 已留池等待回收");
       } else {
         toast.info("本地库暂无待上传 key");
       }
@@ -288,6 +293,10 @@ function UploadCard({
       if (res.limited) {
         toast.info(
           `已建 ${res.createdChannels} 个新渠道共传 ${res.pushed} 个后触发上传限速（剩余待上传 ${res.poolPending}，窗口滚动后自动续传）`
+        );
+      } else if (res.waitingSlot) {
+        toast.info(
+          `已建 ${res.createdChannels} 个新渠道共传 ${res.pushed} 个后名额已满（剩余待上传 ${res.poolPending}，等回收后由系统续建）`
         );
       } else {
         toast.success(

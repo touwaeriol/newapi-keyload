@@ -171,10 +171,39 @@ export interface CreateBatchResult {
   limited?: boolean;
   /** 限速说明（供前端 toast / 日志展示）。 */
   limitedMessage?: string;
+  /** 是否因「仅高优先级」模式无空闲优先级6名额被拦下（created:false，key 留池等回收）。 */
+  waitingSlot?: boolean;
+  /** 等待名额说明。 */
+  waitingMessage?: string;
   poolPending: number;
   poolUploaded: number;
   platformKeyCount: number | null;
   deadKeyCount: number | null;
+}
+
+/**
+ * 「仅高优先级」模式名额门控：返回不可建的原因串（无空闲优先级6名额），有名额则返回 null。
+ * 全局名额（priority6Limit）+ 单用户权限/独立配额都要满足。依赖 countChannelsAtPriority(6) 准确（已由对账保证）。
+ */
+async function highPrioritySlotBlock(
+  user: User,
+  cfg: Awaited<ReturnType<typeof getConfig>>,
+  prefix: string
+): Promise<string | null> {
+  if (user.allowHighPriority === false) {
+    return "仅高优先级模式：该用户未获高优先级权限，key 留池等待";
+  }
+  const g6 = await countChannelsAtPriority(FIXED_PRIORITY);
+  if (g6 >= cfg.priority6Limit) {
+    return `仅高优先级模式：全局高优先级已满（${g6}/${cfg.priority6Limit}），等待名额回收`;
+  }
+  if (user.highPriorityLimit != null) {
+    const u6 = await countChannelsAtPriorityForPrefix(prefix, FIXED_PRIORITY);
+    if (u6 >= user.highPriorityLimit) {
+      return `仅高优先级模式：该用户高优先级配额已满（${u6}/${user.highPriorityLimit}），等待名额回收`;
+    }
+  }
+  return null;
 }
 
 /**
@@ -195,6 +224,23 @@ export async function createChannelFromNextBatch(
 
   const cfg = await getConfig();
   const eff = effectiveUserLimit(user, cfg);
+
+  // —— 仅高优先级模式：无空闲优先级6名额则不建（不认领、不占限速额度），key 留池等回收。 ——
+  if (cfg.onlyHighPriorityEnabled) {
+    const block = await highPrioritySlotBlock(user, cfg, prefix);
+    if (block) {
+      const { pending, uploaded } = await poolCounts(prefix);
+      return {
+        created: false,
+        waitingSlot: true,
+        waitingMessage: block,
+        poolPending: pending,
+        poolUploaded: uploaded,
+        platformKeyCount: null,
+        deadKeyCount: null,
+      };
+    }
+  }
 
   // —— 上传限速：原子「预占」额度（事前扣，让在途上传即时占住桶，杜绝并发双超额）。 ——
   // 依次预占全局桶、用户桶（用户只在全局已批额度内再占）；不足一整批 → 允许小批（避免限额<聚合数死锁）。
@@ -294,20 +340,23 @@ export async function createChannelFromNextBatch(
 
   // —— 优先级判定：按用户高优先级配额 + 本地全局配额（省去「先试6→服务器报错→再试5」往返）。 ——
   // 用户被禁高优先级 → 直接 5；否则若全局优先级6已满 或 用户独立优先级6数量已满 → 5。服务器报错仍作兜底。
+  // 仅高优先级模式：已在函数入口门控过名额，此处**强制优先级6**，不走降级到5。
   let desiredPriority = FIXED_PRIORITY;
   let demoteReason = "";
-  const priority6Count = await countChannelsAtPriority(FIXED_PRIORITY);
-  if (user.allowHighPriority === false) {
-    desiredPriority = DEMOTED_PRIORITY;
-    demoteReason = "该用户被禁用高优先级";
-  } else if (priority6Count >= cfg.priority6Limit) {
-    desiredPriority = DEMOTED_PRIORITY;
-    demoteReason = `全局优先级 ${FIXED_PRIORITY} 已满（${priority6Count}/${cfg.priority6Limit}）`;
-  } else if (user.highPriorityLimit != null) {
-    const userP6 = await countChannelsAtPriorityForPrefix(prefix, FIXED_PRIORITY);
-    if (userP6 >= user.highPriorityLimit) {
+  if (!cfg.onlyHighPriorityEnabled) {
+    const priority6Count = await countChannelsAtPriority(FIXED_PRIORITY);
+    if (user.allowHighPriority === false) {
       desiredPriority = DEMOTED_PRIORITY;
-      demoteReason = `该用户独立优先级 ${FIXED_PRIORITY} 配额已满（${userP6}/${user.highPriorityLimit}）`;
+      demoteReason = "该用户被禁用高优先级";
+    } else if (priority6Count >= cfg.priority6Limit) {
+      desiredPriority = DEMOTED_PRIORITY;
+      demoteReason = `全局优先级 ${FIXED_PRIORITY} 已满（${priority6Count}/${cfg.priority6Limit}）`;
+    } else if (user.highPriorityLimit != null) {
+      const userP6 = await countChannelsAtPriorityForPrefix(prefix, FIXED_PRIORITY);
+      if (userP6 >= user.highPriorityLimit) {
+        desiredPriority = DEMOTED_PRIORITY;
+        demoteReason = `该用户独立优先级 ${FIXED_PRIORITY} 配额已满（${userP6}/${user.highPriorityLimit}）`;
+      }
     }
   }
 
@@ -333,8 +382,30 @@ export async function createChannelFromNextBatch(
         });
       }
     } catch (err) {
-      // 兜底：本地计数与服务器不一致时仍可能撞「优先级6已达到最多6个启用渠道限制」→ 回退优先级 5
       if (desiredPriority === FIXED_PRIORITY && isPriorityQuotaError(err)) {
+        if (cfg.onlyHighPriorityEnabled) {
+          // 仅高优先级模式：naci 报优先级6已满（与本地计数竞态）→ **不回退到5**，回滚并留池等回收。
+          await releaseClaim(batchIds);
+          await deleteCreatedChannel(alloc.id);
+          await releaseReservation();
+          const { pending, uploaded } = await poolCounts(prefix);
+          await addLog({
+            level: "info",
+            actor: user.username,
+            channelName: alloc.channelName,
+            message: `仅高优先级模式：naci 报优先级 ${FIXED_PRIORITY} 已满，本批 key 留池等待名额回收`,
+          });
+          return {
+            created: false,
+            waitingSlot: true,
+            waitingMessage: `仅高优先级模式：全局高优先级已满，等待名额回收`,
+            poolPending: pending,
+            poolUploaded: uploaded,
+            platformKeyCount: null,
+            deadKeyCount: null,
+          };
+        }
+        // 非该模式：本地计数与服务器不一致时撞「优先级6已达上限」→ 回退优先级 5
         usedPriority = DEMOTED_PRIORITY;
         created = await createChannel({
           name: alloc.channelName,
@@ -451,6 +522,9 @@ export async function createChannelsDrain(
   /** 是否因上传限速提前停止（池里还有 pending，等窗口滚动） */
   limited: boolean;
   limitedMessage?: string;
+  /** 是否因「仅高优先级」无空闲名额提前停止（池里还有 pending，等回收） */
+  waitingSlot: boolean;
+  waitingMessage?: string;
 }> {
   let createdChannels = 0;
   let pushed = 0;
@@ -459,7 +533,7 @@ export async function createChannelsDrain(
     if (pushed >= maxKeys) break; // 本次已处理够「每批处理数量」个 key
     const r = await createChannelFromNextBatch(user);
     last = r;
-    if (!r.created) break; // 池空或被限速（r.limited）都停止本轮
+    if (!r.created) break; // 池空 / 被限速(limited) / 无名额(waitingSlot) 都停止本轮
     createdChannels += 1;
     pushed += r.keyCount ?? 0;
   }
@@ -471,6 +545,8 @@ export async function createChannelsDrain(
       poolUploaded: last.poolUploaded,
       limited: Boolean(last.limited),
       limitedMessage: last.limitedMessage,
+      waitingSlot: Boolean(last.waitingSlot),
+      waitingMessage: last.waitingMessage,
     };
   }
   const { pending, uploaded } = await poolCounts(user.channelName.trim());
@@ -480,6 +556,7 @@ export async function createChannelsDrain(
     poolPending: pending,
     poolUploaded: uploaded,
     limited: false,
+    waitingSlot: false,
   };
 }
 
@@ -501,6 +578,9 @@ export interface DirectUploadResult {
   /** 是否因上传限速未推完（剩余 pending 等窗口滚动后由引擎续传） */
   limited?: boolean;
   limitedMessage?: string;
+  /** 是否因「仅高优先级」无空闲名额未推完（剩余 pending 等回收后由引擎续建） */
+  waitingSlot?: boolean;
+  waitingMessage?: string;
 }
 
 /**
@@ -531,7 +611,7 @@ export async function directUploadKeys(
     channelName: prefix,
     message: `直接上传：新录入 ${added} 个，建 ${drain.createdChannels} 个新渠道共传 ${drain.pushed} 个 key（剩余待上传 ${drain.poolPending}）${
       drain.limited ? "，已触发上传限速，剩余等窗口滚动自动续传" : ""
-    }`,
+    }${drain.waitingSlot ? "，仅高优先级模式名额已满，剩余等回收后续建" : ""}`,
   });
 
   return {
@@ -544,6 +624,8 @@ export async function directUploadKeys(
     deadKeyCount: null,
     limited: drain.limited,
     limitedMessage: drain.limitedMessage,
+    waitingSlot: drain.waitingSlot,
+    waitingMessage: drain.waitingMessage,
   };
 }
 
@@ -934,6 +1016,7 @@ export async function resolveMyChannel(user: User) {
       autoRefillEnabled,
       uploadLimit,
       manualUploadEnabled,
+      onlyHighPriority: cfg.onlyHighPriorityEnabled,
       highPriority: {
         allowed: user.allowHighPriority !== false,
         limit: user.highPriorityLimit ?? null,
@@ -972,6 +1055,7 @@ export async function resolveMyChannel(user: User) {
     autoRefillEnabled,
     uploadLimit,
     manualUploadEnabled,
+    onlyHighPriority: cfg.onlyHighPriorityEnabled,
     highPriority: {
       allowed: user.allowHighPriority !== false,
       limit: user.highPriorityLimit ?? null,

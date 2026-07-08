@@ -37,6 +37,9 @@ export interface DirectUploadResult {
   /** 是否因上传限速未推完（剩余 pending 等窗口滚动后由引擎续传） */
   limited?: boolean;
   limitedMessage?: string;
+  /** 是否因「仅高优先级」无空闲名额未推完（剩余 pending 等回收后由引擎续建） */
+  waitingSlot?: boolean;
+  waitingMessage?: string;
 }
 
 /** 上传弹窗内联结果：入队 or 直传，用 mode 区分展示。 */
@@ -128,6 +131,10 @@ export function UploadKeyModal({
       if (res.limited) {
         toast.info(
           `已建 ${res.createdChannels} 个新渠道共传 ${res.pushed} 个后触发上传限速（剩余待上传 ${res.poolPending}，窗口滚动后自动续传）`
+        );
+      } else if (res.waitingSlot) {
+        toast.info(
+          `已建 ${res.createdChannels} 个新渠道共传 ${res.pushed} 个后名额已满（剩余待上传 ${res.poolPending}，等回收后由系统续建）`
         );
       } else {
         toast.success(
@@ -241,6 +248,11 @@ export function DirectResultView({ result }: { result: DirectUploadResult }) {
         <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
           ⚠️ {result.limitedMessage ?? "已触发上传限速"}
           ，剩余待上传的 key 会在窗口滚动后由定时引擎自动续传。
+        </p>
+      )}
+      {result.waitingSlot && (
+        <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+          ⚠️ 仅高优先级模式：暂无空闲优先级6名额，剩余待上传的 key 会在名额回收后由系统自动续建。
         </p>
       )}
       <div className="grid grid-cols-3 gap-3 text-sm">

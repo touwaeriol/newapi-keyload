@@ -76,6 +76,8 @@ interface ConfigResponse {
   userUploadLimitWindowMinutes: number;
   /** 是否允许普通用户手动上传（false=只能录入本地库，由引擎自动推站点） */
   userManualUploadEnabled: boolean;
+  /** 仅使用高优先级渠道：只在有空闲优先级6名额时建渠道，不降级到5 */
+  onlyHighPriorityEnabled: boolean;
 }
 
 const DEFAULT_BATCH_SIZE = 20;
@@ -122,6 +124,8 @@ function ConfigCard() {
   const [autoRefill, setAutoRefill] = useState(true);
   // 全局「禁止用户手动上传」：state 存「是否允许」，UI 展示取反为「禁止」
   const [manualUploadEnabled, setManualUploadEnabled] = useState(true);
+  // 仅使用高优先级渠道
+  const [onlyHighPriority, setOnlyHighPriority] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [pinging, setPinging] = useState(false);
@@ -211,6 +215,7 @@ function ConfigCard() {
           ? data.userManualUploadEnabled
           : true
       );
+      setOnlyHighPriority(Boolean(data.onlyHighPriorityEnabled));
       setPassword("");
     } catch (err) {
       if (!mounted.current) return;
@@ -302,6 +307,7 @@ function ConfigCard() {
           userUploadLimitCount: safeUCount,
           userUploadLimitWindowMinutes: safeUWindow,
           userManualUploadEnabled: manualUploadEnabled,
+          onlyHighPriorityEnabled: onlyHighPriority,
         }),
       });
       toast.success("配置已保存");
@@ -507,6 +513,20 @@ function ConfigCard() {
                   onChange={(e) => setDemoteGrace(e.target.valueAsNumber)}
                   placeholder={String(DEFAULT_DEMOTE_GRACE)}
                 />
+              </Field>
+              <Field
+                label="仅使用高优先级渠道"
+                hint="开启后只在有空闲优先级6名额时才建渠道（不降级到5）；名额满则 key 留池等回收，多用户按轮转公平分配"
+              >
+                <label className="flex cursor-pointer items-center gap-2 py-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={onlyHighPriority}
+                    onChange={(e) => setOnlyHighPriority(e.target.checked)}
+                    className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-400"
+                  />
+                  {onlyHighPriority ? "已开启" : "已关闭"}
+                </label>
               </Field>
             </div>
           </ConfigSection>
