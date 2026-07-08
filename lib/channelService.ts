@@ -7,10 +7,10 @@
 // 定时引擎（lib/engine.ts）在开启自动补给时，把仍有 pending 的前缀逐批建成新渠道。
 import {
   createChannel,
+  getChannel,
   getChannelSites,
   getChannelsStatusBatch,
   getChannelsUsedQuota,
-  listChannels,
   setChannelPriority,
   setSiteStatus,
 } from "./naci";
@@ -34,8 +34,8 @@ import {
   finalizeCreatedChannel,
   getConfig,
   getUploadedKeyCount,
-  listAllCreatedChannels,
   listChannelsAbovePriority,
+  listRecentCreatedChannels,
   listCreatedChannels,
   markPoolUploaded,
   poolCounts,
@@ -820,6 +820,11 @@ export async function demoteAllDegradedChannels(): Promise<number> {
   return demoted;
 }
 
+/** 对账每轮扫描的最近渠道数（有界，控制 naci 请求量）。naci 优先级6配额小、总被最新渠道占用，覆盖最近这批即可。 */
+const RECONCILE_RECENT_LIMIT = 80;
+/** 对账逐个读 naci 详情间的节流（毫秒），避免触发 429。 */
+const RECONCILE_REQ_DELAY_MS = 150;
+
 /**
  * 优先级对账：把本地 created_channels.priority **双向同步为 naci 的真实优先级**。
  *
@@ -828,46 +833,29 @@ export async function demoteAllDegradedChannels(): Promise<number> {
  * - 建渠道时本地记5（当时本地计数显示满）但 naci 实际按6建 → 本地「假5」，降级任务用
  *   `listChannelsAbovePriority(5)`（本地>5）**看不到**它 → 该优先级6渠道即使自动禁用也永不降级。
  *
- * 因此对账必须以 **naci 全量列表为准**（而非本地优先级筛选），逐个比对本地记录并同步。返回同步条数。
- * 每轮拉取全部渠道（分页，几百量级 → 几次请求），开销可接受；列表读失败整轮跳过、下轮重试。
+ * 关键：naci 的**列表端点会漏渠道**（实测新建的部分渠道 GET 列表拿不到，但按 id GET 详情正常），
+ * 因此对账**以本地渠道为枚举源**、逐个用 `getChannel(id)` 详情读 naci 真实优先级（可靠），不一致则同步本地。
+ * 全量 getChannel 太重，故只扫**最近 RECONCILE_RECENT_LIMIT 个**渠道（优先级6只可能在最新这批）。返回同步条数。
  */
 export async function reconcileTrackedPriorities(): Promise<number> {
-  // 1) 拉 naci 全量渠道 → id→真实优先级（分页 + 去重防不推进死循环）
-  const naciPrio = new Map<number, number>();
-  const seen = new Set<number>();
-  const pageSize = 100;
-  for (let page = 1; page <= 60; page++) {
-    let items: Awaited<ReturnType<typeof listChannels>>["items"];
-    try {
-      ({ items } = await listChannels(page, pageSize));
-    } catch {
-      return 0; // 列表读失败 → 本轮放弃对账（不误改本地）
-    }
-    let fresh = 0;
-    for (const it of items) {
-      const id = Number(it.id);
-      if (!Number.isFinite(id)) continue;
-      if (!seen.has(id)) {
-        seen.add(id);
-        fresh += 1;
-      }
-      const p = Number((it as { priority?: unknown }).priority);
-      if (Number.isFinite(p)) naciPrio.set(id, p);
-    }
-    if (items.length < pageSize || fresh === 0) break;
-  }
-  if (naciPrio.size === 0) return 0;
-
-  // 2) 逐个本地渠道比对 naci 真实优先级，不一致则同步本地
-  const locals = await listAllCreatedChannels();
+  const recent = await listRecentCreatedChannels(RECONCILE_RECENT_LIMIT);
+  if (recent.length === 0) return 0;
   let fixed = 0;
   const affected = new Set<string>();
-  for (const c of locals) {
+  for (const c of recent) {
     if (c.channelId == null) continue;
-    const np = naciPrio.get(c.channelId);
-    if (np == null || np === c.priority) continue;
+    let naciPriority: number | null = null;
     try {
-      await updateCreatedChannelPriority(c.channelId, np);
+      const detail = await getChannel(c.channelId);
+      const p = Number((detail as { priority?: unknown }).priority);
+      naciPriority = Number.isFinite(p) ? p : null;
+    } catch {
+      continue; // naci 读失败（网络/已删）→ 跳过，下轮重试
+    }
+    await new Promise((r) => setTimeout(r, RECONCILE_REQ_DELAY_MS));
+    if (naciPriority == null || naciPriority === c.priority) continue;
+    try {
+      await updateCreatedChannelPriority(c.channelId, naciPriority);
       fixed += 1;
       affected.add(c.prefix);
       await addLog({
@@ -875,7 +863,7 @@ export async function reconcileTrackedPriorities(): Promise<number> {
         actor: "engine",
         channelName: c.prefix,
         channelId: c.channelId,
-        message: `优先级对账：渠道 ${c.channelName} 本地 ${c.priority} → naci 实际 ${np}（修正本地缓存）`,
+        message: `优先级对账：渠道 ${c.channelName} 本地 ${c.priority} → naci 实际 ${naciPriority}（修正本地缓存）`,
       });
     } catch {
       // 更新失败：下轮重试
