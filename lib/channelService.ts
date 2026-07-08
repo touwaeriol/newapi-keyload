@@ -10,7 +10,6 @@ import {
   getChannelSites,
   getChannelsStatusBatch,
   getChannelsUsedQuota,
-  reenableAllSites,
   setSiteStatus,
 } from "./naci";
 import { parseKeys, PUBLISH_SITES } from "./supplier";
@@ -189,7 +188,6 @@ export async function createChannelFromNextBatch(
   }
 
   let channelId: number;
-  let keyStats: KeyStats | null = null;
   let publishSites: CreatedChannelSite[] = [];
   try {
     const created = await createChannel({ name: alloc.channelName, keyText });
@@ -202,24 +200,21 @@ export async function createChannelFromNextBatch(
         remoteChannelId: p.remote_channel_id,
         remoteChannelName: p.remote_channel_name,
       }));
-    try {
-      keyStats = await reenableAllSites(channelId);
-    } catch (err) {
-      keyStats = null;
-      await addLog({
-        level: "error",
-        actor: user.username,
-        channelName: alloc.channelName,
-        channelId,
-        message: `打开站点调度异常：${err instanceof Error ? err.message : String(err)}`,
-      });
-    }
   } catch (err) {
     // naci 创建失败：认领退回 pending + 删除占位行（释放序号，下次可复用）
     await releaseClaim(batchIds);
     await deleteCreatedChannel(alloc.id);
     throw err;
   }
+
+  // 新建渠道即已启用发布（status:1 + publish_results 均 created），**无需再打开站点调度**。
+  // 旧的 reenableAllSites 是给「append 到旧渠道、渠道会自动禁用需重开」用的，新模型不需要。
+  // 平台 key 统计乐观置为本批数量（刚上传、全存活），随后由 status-batch 实时刷新校正。
+  const keyStats: KeyStats = {
+    platformKeyCount: cleanKeys.length,
+    deadKeyCount: 0,
+    statusList: [],
+  };
 
   // naci 已成功：先把 key 标记已上传（claimed→uploaded），确保后续任一步失败也不会重传本批。
   await markPoolUploaded(batchIds);
