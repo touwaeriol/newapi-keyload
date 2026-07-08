@@ -217,7 +217,8 @@ async function highPrioritySlotBlock(
  *    避免让已建成的渠道把 key 退回 pending 造成重传）；记累计去重；回写用户缓存；失效实时缓存。
  */
 export async function createChannelFromNextBatch(
-  user: User
+  user: User,
+  opts: { viaScheduler?: boolean } = {}
 ): Promise<CreateBatchResult> {
   const prefix = user.channelName.trim();
   if (!prefix) throw new Error("当前用户未配置渠道前缀，无法上传 key");
@@ -225,8 +226,24 @@ export async function createChannelFromNextBatch(
   const cfg = await getConfig();
   const eff = effectiveUserLimit(user, cfg);
 
-  // —— 仅高优先级模式：无空闲优先级6名额则不建（不认领、不占限速额度），key 留池等回收。 ——
+  // —— 仅高优先级模式 ——
   if (cfg.onlyHighPriorityEnabled) {
+    // 只有定时任务（公平轮转分配器）能建渠道：手动「上传一批」/「直接上传」一律入池排队，
+    // 交由 distributeHighPriorityRoundRobin 在各用户间公平分配空闲名额（避免单用户抢光）。
+    if (!opts.viaScheduler) {
+      const { pending, uploaded } = await poolCounts(prefix);
+      return {
+        created: false,
+        waitingSlot: true,
+        waitingMessage:
+          "仅高优先级模式：渠道由定时任务在各用户间公平分配，key 已在本地库排队等待",
+        poolPending: pending,
+        poolUploaded: uploaded,
+        platformKeyCount: null,
+        deadKeyCount: null,
+      };
+    }
+    // 无空闲优先级6名额则不建（不认领、不占限速额度），key 留池等回收。
     const block = await highPrioritySlotBlock(user, cfg, prefix);
     if (block) {
       const { pending, uploaded } = await poolCounts(prefix);
@@ -586,6 +603,8 @@ export interface DirectUploadResult {
 /**
  * 直接上传：先把本批 key 落本地池去重，再把池里的 pending 逐批建成新渠道（一次性清空）。
  * 与「提交上传」（只落池、等引擎/手动按钮）区别在于立即建渠道。
+ * 例外：**仅高优先级模式**下直接上传退化为「只入池」（不即时建渠道），
+ * 由定时任务在各用户间公平分配高优先级名额，避免单用户经直接上传抢光稀缺名额。
  */
 export async function directUploadKeys(
   user: User,
@@ -603,6 +622,31 @@ export async function directUploadKeys(
 
   const { added } = await addKeysToPool(prefix, cleanKeys);
   const cfg = await getConfig();
+
+  // 仅高优先级模式：直接上传不即时建渠道（会抢占稀缺名额、破坏公平），改为入池，
+  // 由定时任务（公平轮转分配器）在各用户间分配空闲优先级6名额。等同「提交上传」。
+  if (cfg.onlyHighPriorityEnabled) {
+    const { pending, uploaded } = await poolCounts(prefix);
+    await addLog({
+      level: "info",
+      actor: user.username,
+      channelName: prefix,
+      message: `直接上传：仅高优先级模式已改为入池 ${added} 个，由定时任务在各用户间公平分配高优先级渠道（待上传 ${pending}）`,
+    });
+    return {
+      added,
+      pushed: 0,
+      createdChannels: 0,
+      poolPending: pending,
+      poolUploaded: uploaded,
+      platformKeyCount: null,
+      deadKeyCount: null,
+      waitingSlot: true,
+      waitingMessage:
+        "仅高优先级模式：直接上传已改为入池，由定时任务在各用户间公平分配高优先级渠道",
+    };
+  }
+
   const drain = await createChannelsDrain(user, cfg.processBatchSize);
 
   await addLog({

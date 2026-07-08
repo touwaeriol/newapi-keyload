@@ -134,7 +134,8 @@ export function UploadKeyModal({
         );
       } else if (res.waitingSlot) {
         toast.info(
-          `已建 ${res.createdChannels} 个新渠道共传 ${res.pushed} 个后名额已满（剩余待上传 ${res.poolPending}，等回收后由系统续建）`
+          res.waitingMessage ??
+            `已录入 ${res.added} 个，剩余待上传 ${res.poolPending}，由定时任务公平分配高优先级渠道`
         );
       } else {
         toast.success(
@@ -252,7 +253,9 @@ export function DirectResultView({ result }: { result: DirectUploadResult }) {
       )}
       {result.waitingSlot && (
         <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
-          ⚠️ 仅高优先级模式：暂无空闲优先级6名额，剩余待上传的 key 会在名额回收后由系统自动续建。
+          ⚠️{" "}
+          {result.waitingMessage ??
+            "仅高优先级模式：key 已入池，由定时任务在各用户间公平分配高优先级渠道。"}
         </p>
       )}
       <div className="grid grid-cols-3 gap-3 text-sm">

@@ -131,6 +131,7 @@ export function UserPanel({ user }: { user: SafeUser }) {
       <UploadCard
         onUploaded={() => fetchChannel(false)}
         manualUploadEnabled={channel?.manualUploadEnabled !== false}
+        onlyHighPriority={channel?.onlyHighPriority === true}
       />
     </div>
   );
@@ -158,6 +159,7 @@ function ChannelCard({
   const toast = useToast();
   const [creating, setCreating] = useState(false);
   const manualDisabled = channel?.manualUploadEnabled === false;
+  const onlyHigh = channel?.onlyHighPriority === true;
 
   // 顶部按钮：从本地池取「下一批」新建一个渠道并发布
   async function createBatch() {
@@ -198,9 +200,11 @@ function ChannelCard({
           <Button
             onClick={createBatch}
             loading={creating}
-            disabled={manualDisabled}
+            disabled={manualDisabled || onlyHigh}
             title={
-              manualDisabled
+              onlyHigh
+                ? "仅高优先级模式：渠道由定时任务在各用户间公平分配，请用「提交上传」录入本地库"
+                : manualDisabled
                 ? "管理员已关闭手动上传，key 录入本地库后由系统自动上传"
                 : undefined
             }
@@ -233,9 +237,11 @@ type UploadCardResult =
 function UploadCard({
   onUploaded,
   manualUploadEnabled = true,
+  onlyHighPriority = false,
 }: {
   onUploaded: () => void;
   manualUploadEnabled?: boolean;
+  onlyHighPriority?: boolean;
 }) {
   const toast = useToast();
   const [text, setText] = useState("");
@@ -296,7 +302,8 @@ function UploadCard({
         );
       } else if (res.waitingSlot) {
         toast.info(
-          `已建 ${res.createdChannels} 个新渠道共传 ${res.pushed} 个后名额已满（剩余待上传 ${res.poolPending}，等回收后由系统续建）`
+          res.waitingMessage ??
+            `已录入 ${res.added} 个，剩余待上传 ${res.poolPending}，由定时任务公平分配高优先级渠道`
         );
       } else {
         toast.success(
@@ -317,10 +324,17 @@ function UploadCard({
       subtitle="每行一个 key。提交上传＝先录入本地库，由「上传一批」按钮或定时引擎分批建渠道；直接上传＝录入并立即把待上传的 key 逐批建成新渠道"
     >
       <div className="space-y-3">
-        {!manualUploadEnabled && (
+        {onlyHighPriority ? (
           <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
-            管理员已关闭手动上传：仅可「提交上传」录入本地库，系统会自动分批推送到站点。
+            仅高优先级模式：请用「提交上传」录入本地库，系统会由定时任务在各用户间
+            <b>公平分配</b>高优先级渠道（直接上传/手动建渠道已关闭）。
           </p>
+        ) : (
+          !manualUploadEnabled && (
+            <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+              管理员已关闭手动上传：仅可「提交上传」录入本地库，系统会自动分批推送到站点。
+            </p>
+          )
         )}
         <textarea
           value={text}
@@ -338,9 +352,11 @@ function UploadCard({
               variant="secondary"
               onClick={submitDirect}
               loading={directLoading}
-              disabled={busy || !manualUploadEnabled}
+              disabled={busy || !manualUploadEnabled || onlyHighPriority}
               title={
-                !manualUploadEnabled
+                onlyHighPriority
+                  ? "仅高优先级模式：直接上传已关闭，请用「提交上传」录入本地库，由定时任务公平分配高优先级渠道"
+                  : !manualUploadEnabled
                   ? "管理员已关闭手动上传，请用「提交上传」录入本地库"
                   : undefined
               }

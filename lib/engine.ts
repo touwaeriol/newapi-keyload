@@ -16,12 +16,14 @@ import {
   channelsWithPending,
   clampIntervalMinutes,
   clampPriorityTaskIntervalMinutes,
+  countChannelsAtPriorityForPrefix,
   findUserByChannelName,
   getConfig,
   poolCounts,
   prefixesWithCreatedChannels,
   reclaimStaleClaimed,
 } from "./store";
+import { FIXED_PRIORITY } from "./supplier";
 
 /** 补给间隔默认值（分钟）——首个 tick 读到配置前的兜底，与 store 的 seed 一致。 */
 const DEFAULT_INTERVAL_MS = 60_000;
@@ -199,9 +201,13 @@ async function processPrefix(
 const RR_HARD_CAP = 5000;
 
 /**
- * 「仅高优先级」模式的公平分配器：把空闲优先级6名额按**轮转**分给有待上传的各前缀
- *（每轮每个前缀各建 1 个渠道），直到名额用尽 / 各前缀池空 / 用户配额满。
- * 依赖 createChannelFromNextBatch 内部名额门控：无名额时返回 waitingSlot，本前缀退出轮转；
+ * 「仅高优先级」模式的公平分配器：把空闲优先级6名额按**最少者优先的轮转**分给有待上传的各前缀。
+ *
+ * 公平算法：**每一轮**都按各用户「当前持有的优先级6渠道数」升序排序（持有最少者先分），
+ * 每轮给每个前缀各建 1 个渠道。稀缺名额中途用尽时，本轮排在后面（已持有较多）的用户先被拒，
+ * 于是空闲/回收出来的名额总是优先流向享受最少的用户 → 长期看各用户尽量均等（max-min 公平）。
+ *
+ * 依赖 createChannelFromNextBatch 内部名额门控：无名额/用户配额满时返回 waitingSlot，本前缀退出本次轮转；
  * 全局名额耗尽时所有前缀下一轮都 waitingSlot → active 清空、循环结束。返回本次建成的渠道数。
  */
 async function distributeHighPriorityRoundRobin(): Promise<number> {
@@ -216,11 +222,19 @@ async function distributeHighPriorityRoundRobin(): Promise<number> {
   let built = 0;
   let guard = 0;
   while (active.length > 0 && guard++ < RR_HARD_CAP) {
+    // 本轮开始：按当前高优先级持有数升序排序（持有最少者优先拿到稀缺名额）。
+    const counts = new Map<string, number>();
+    for (const e of active) {
+      counts.set(e.prefix, await countChannelsAtPriorityForPrefix(e.prefix, FIXED_PRIORITY));
+    }
+    active.sort((a, b) => (counts.get(a.prefix) ?? 0) - (counts.get(b.prefix) ?? 0));
+
     let progressed = false;
     for (const entry of [...active]) {
       let r;
       try {
-        r = await createChannelFromNextBatch(entry.user!);
+        // viaScheduler:true —— 仅定时任务可建渠道，手动/直接路径一律入池（见 createChannelFromNextBatch 门控）。
+        r = await createChannelFromNextBatch(entry.user!, { viaScheduler: true });
       } catch (err) {
         recordResult(
           entry.prefix,
@@ -328,7 +342,17 @@ export function kickEngine(prefix: string): void {
     state.lastTickAt = Date.now();
     try {
       const cfg = await getConfig();
-      await processPrefix(name, cfg.autoRefillEnabled, cfg.processBatchSize);
+      // 仅高优先级模式：kick 也走**公平轮转**（不针对单一前缀），避免触发上传的用户抢光名额；
+      // 其余模式按原逻辑只处理该前缀。
+      if (cfg.onlyHighPriorityEnabled && cfg.autoRefillEnabled) {
+        await distributeHighPriorityRoundRobin();
+        for (const p of await prefixesWithCreatedChannels()) {
+          const u = await findUserByChannelName(p);
+          if (u) await refreshPrefixRealtime(u);
+        }
+      } else {
+        await processPrefix(name, cfg.autoRefillEnabled, cfg.processBatchSize);
+      }
     } catch (err) {
       console.error("[engine] kick 失败:", err);
     } finally {
