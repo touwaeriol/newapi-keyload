@@ -218,7 +218,7 @@ async function highPrioritySlotBlock(
  */
 export async function createChannelFromNextBatch(
   user: User,
-  opts: { viaScheduler?: boolean } = {}
+  opts: { viaScheduler?: boolean; forceNormalPriority?: boolean } = {}
 ): Promise<CreateBatchResult> {
   const prefix = user.channelName.trim();
   if (!prefix) throw new Error("当前用户未配置渠道前缀，无法上传 key");
@@ -226,17 +226,19 @@ export async function createChannelFromNextBatch(
   const cfg = await getConfig();
   const eff = effectiveUserLimit(user, cfg);
 
-  // —— 仅高优先级模式 ——
-  if (cfg.onlyHighPriorityEnabled) {
-    // 只有定时任务（公平轮转分配器）能建渠道：手动「上传一批」/「直接上传」一律入池排队，
-    // 交由 distributeHighPriorityRoundRobin 在各用户间公平分配空闲名额（避免单用户抢光）。
+  // —— 仅高优先级模式：三种入口区别对待 ——
+  // - 直接上传(forceNormalPriority)：**不占用**稀缺高优先级名额，直接建**普通(优先级5)**渠道立即上传；
+  //   跳过下面的名额门控（优先级在后面强制为 DEMOTED_PRIORITY）。
+  // - 定时任务(viaScheduler)：建高优先级(优先级6)渠道，受名额门控 + 公平轮转。
+  // - 其它手动路径（如「上传一批」）：不建，入池排队，由定时任务公平分配 → 返回 waitingSlot。
+  if (cfg.onlyHighPriorityEnabled && !opts.forceNormalPriority) {
     if (!opts.viaScheduler) {
       const { pending, uploaded } = await poolCounts(prefix);
       return {
         created: false,
         waitingSlot: true,
         waitingMessage:
-          "仅高优先级模式：渠道由定时任务在各用户间公平分配，key 已在本地库排队等待",
+          "仅高优先级模式：高优先级渠道由定时任务在各用户间公平分配，key 已在本地库排队（如需立即上传请用「直接上传」，将建普通渠道）",
         poolPending: pending,
         poolUploaded: uploaded,
         platformKeyCount: null,
@@ -360,7 +362,14 @@ export async function createChannelFromNextBatch(
   // 仅高优先级模式：已在函数入口门控过名额，此处**强制优先级6**，不走降级到5。
   let desiredPriority = FIXED_PRIORITY;
   let demoteReason = "";
-  if (!cfg.onlyHighPriorityEnabled) {
+  if (cfg.onlyHighPriorityEnabled) {
+    // 仅高优先级模式：直接上传强制普通优先级(5)，不占用高优先级名额；
+    // 定时任务路径已在入口门控过名额，此处保持优先级6，不走降级。
+    if (opts.forceNormalPriority) {
+      desiredPriority = DEMOTED_PRIORITY;
+      demoteReason = "直接上传（仅高优先级模式下建普通渠道，不占用高优先级名额）";
+    }
+  } else {
     const priority6Count = await countChannelsAtPriority(FIXED_PRIORITY);
     if (user.allowHighPriority === false) {
       desiredPriority = DEMOTED_PRIORITY;
@@ -530,7 +539,8 @@ export async function createChannelFromNextBatch(
  */
 export async function createChannelsDrain(
   user: User,
-  maxKeys: number
+  maxKeys: number,
+  opts: { viaScheduler?: boolean; forceNormalPriority?: boolean } = {}
 ): Promise<{
   createdChannels: number;
   pushed: number;
@@ -548,7 +558,7 @@ export async function createChannelsDrain(
   let last: CreateBatchResult | null = null;
   for (let i = 0; i < MAX_CHANNELS_PER_DRAIN; i++) {
     if (pushed >= maxKeys) break; // 本次已处理够「每批处理数量」个 key
-    const r = await createChannelFromNextBatch(user);
+    const r = await createChannelFromNextBatch(user, opts);
     last = r;
     if (!r.created) break; // 池空 / 被限速(limited) / 无名额(waitingSlot) 都停止本轮
     createdChannels += 1;
@@ -603,8 +613,8 @@ export interface DirectUploadResult {
 /**
  * 直接上传：先把本批 key 落本地池去重，再把池里的 pending 逐批建成新渠道（一次性清空）。
  * 与「提交上传」（只落池、等引擎/手动按钮）区别在于立即建渠道。
- * 例外：**仅高优先级模式**下直接上传退化为「只入池」（不即时建渠道），
- * 由定时任务在各用户间公平分配高优先级名额，避免单用户经直接上传抢光稀缺名额。
+ * 例外：**仅高优先级模式**下直接上传建的是**普通(优先级5)渠道**（不占用稀缺高优先级名额），
+ * 高优先级(优先级6)渠道只能经「提交上传」入池、由定时任务在各用户间公平分配。
  */
 export async function directUploadKeys(
   user: User,
@@ -623,39 +633,23 @@ export async function directUploadKeys(
   const { added } = await addKeysToPool(prefix, cleanKeys);
   const cfg = await getConfig();
 
-  // 仅高优先级模式：直接上传不即时建渠道（会抢占稀缺名额、破坏公平），改为入池，
-  // 由定时任务（公平轮转分配器）在各用户间分配空闲优先级6名额。等同「提交上传」。
-  if (cfg.onlyHighPriorityEnabled) {
-    const { pending, uploaded } = await poolCounts(prefix);
-    await addLog({
-      level: "info",
-      actor: user.username,
-      channelName: prefix,
-      message: `直接上传：仅高优先级模式已改为入池 ${added} 个，由定时任务在各用户间公平分配高优先级渠道（待上传 ${pending}）`,
-    });
-    return {
-      added,
-      pushed: 0,
-      createdChannels: 0,
-      poolPending: pending,
-      poolUploaded: uploaded,
-      platformKeyCount: null,
-      deadKeyCount: null,
-      waitingSlot: true,
-      waitingMessage:
-        "仅高优先级模式：直接上传已改为入池，由定时任务在各用户间公平分配高优先级渠道",
-    };
-  }
-
-  const drain = await createChannelsDrain(user, cfg.processBatchSize);
+  // 仅高优先级模式：直接上传**不占用**稀缺的高优先级名额，直接建**普通(优先级5)**渠道立即上传；
+  // 高优先级(优先级6)渠道只能通过「提交上传」入池、由定时任务在各用户间公平分配。
+  const drain = await createChannelsDrain(
+    user,
+    cfg.processBatchSize,
+    cfg.onlyHighPriorityEnabled ? { forceNormalPriority: true } : {}
+  );
 
   await addLog({
     level: "info",
     actor: user.username,
     channelName: prefix,
-    message: `直接上传：新录入 ${added} 个，建 ${drain.createdChannels} 个新渠道共传 ${drain.pushed} 个 key（剩余待上传 ${drain.poolPending}）${
+    message: `直接上传：新录入 ${added} 个，建 ${drain.createdChannels} 个${
+      cfg.onlyHighPriorityEnabled ? "普通(优先级5)" : ""
+    }新渠道共传 ${drain.pushed} 个 key（剩余待上传 ${drain.poolPending}）${
       drain.limited ? "，已触发上传限速，剩余等窗口滚动自动续传" : ""
-    }${drain.waitingSlot ? "，仅高优先级模式名额已满，剩余等回收后续建" : ""}`,
+    }`,
   });
 
   return {

@@ -326,8 +326,9 @@ function UploadCard({
       <div className="space-y-3">
         {onlyHighPriority ? (
           <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
-            仅高优先级模式：请用「提交上传」录入本地库，系统会由定时任务在各用户间
-            <b>公平分配</b>高优先级渠道（直接上传/手动建渠道已关闭）。
+            仅高优先级模式：<b>提交上传</b>录入本地库，由定时任务在各用户间
+            <b>公平分配高优先级渠道</b>；<b>直接上传</b>则立即创建
+            <b>普通(非高优先级)渠道</b>。
           </p>
         ) : (
           !manualUploadEnabled && (
@@ -352,10 +353,10 @@ function UploadCard({
               variant="secondary"
               onClick={submitDirect}
               loading={directLoading}
-              disabled={busy || !manualUploadEnabled || onlyHighPriority}
+              disabled={busy || !manualUploadEnabled}
               title={
                 onlyHighPriority
-                  ? "仅高优先级模式：直接上传已关闭，请用「提交上传」录入本地库，由定时任务公平分配高优先级渠道"
+                  ? "仅高优先级模式：直接上传会立即创建普通(非高优先级)渠道；高优先级渠道请用「提交上传」由定时任务公平分配"
                   : !manualUploadEnabled
                   ? "管理员已关闭手动上传，请用「提交上传」录入本地库"
                   : undefined

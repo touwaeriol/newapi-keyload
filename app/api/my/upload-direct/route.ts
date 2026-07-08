@@ -2,7 +2,6 @@ import { NextRequest } from "next/server";
 import { errorResponse, fail, ok, requireUser } from "@/lib/auth";
 import { parseKeys } from "@/lib/supplier";
 import { directUploadKeys } from "@/lib/channelService";
-import { kickEngine } from "@/lib/engine";
 import { getConfig } from "@/lib/store";
 
 export const runtime = "nodejs";
@@ -29,8 +28,6 @@ export async function POST(req: NextRequest) {
     }
 
     const result = await directUploadKeys(user, keys);
-    // 仅高优先级模式下直接上传只入池：kick 一次让定时任务尽快公平分配（kick 内部按模式走轮转）。
-    if (result.waitingSlot) kickEngine(user.channelName);
     return ok(result);
   } catch (err) {
     return errorResponse(err);
