@@ -7,6 +7,7 @@
 // 定时引擎（lib/engine.ts）在开启自动补给时，把仍有 pending 的前缀逐批建成新渠道。
 import {
   createChannel,
+  getChannel,
   getChannelSites,
   getChannelsStatusBatch,
   getChannelsUsedQuota,
@@ -310,7 +311,8 @@ export async function createChannelFromNextBatch(
   }
 
   let channelId: number;
-  let usedPriority = desiredPriority; // 实际使用的优先级
+  let usedPriority = desiredPriority; // 请求/兜底后使用的优先级
+  let actualPriority: number | undefined; // naci 创建响应里回读的**实际**优先级（可能被服务端静默降级）
   let publishSites: CreatedChannelSite[] = [];
   try {
     let created;
@@ -350,6 +352,12 @@ export async function createChannelFromNextBatch(
       }
     }
     channelId = created.id;
+    // 回读 naci 实际赋予的优先级：naci 在优先级6配额满时可能**不报错**、静默按 5 建，
+    // 若响应里带真实 priority 则以它为准落库，避免本地记「假6」（拿不到则退回 usedPriority）。
+    {
+      const p = Number((created as { priority?: unknown }).priority);
+      if (Number.isFinite(p)) actualPriority = p;
+    }
     // 建渠道即已发布并自动启用站点调度，无需再调 reenableAllSites（旧「手动打开调度」逻辑已移除）。
     // 各站远程渠道 id（publish_results）→ 落库入参（只留拿到 remote id 的站）
     publishSites = created.publishResults
@@ -376,7 +384,7 @@ export async function createChannelFromNextBatch(
     await finalizeCreatedChannel(alloc.id, {
       channelId,
       keyCount: cleanKeys.length,
-      priority: usedPriority,
+      priority: actualPriority ?? usedPriority,
     });
     if (publishSites.length > 0) {
       await recordCreatedChannelSites(alloc.id, publishSites);
@@ -809,6 +817,52 @@ export async function demoteAllDegradedChannels(): Promise<number> {
 
   for (const p of affectedPrefixes) invalidateChannelCache(p);
   return demoted;
+}
+
+/**
+ * 优先级对账：把本地 created_channels.priority **同步为 naci 的真实优先级**。
+ *
+ * 背景：本地优先级是「建渠道时写一次」的缓存，之后只有本降级任务处理退化渠道时才更新。
+ * 但 naci 会在**创建时**（优先级6配额满却不报错、静默按 5 建）或**之后服务端**把优先级6渠道降到 5，
+ * 这些健康渠道不满足退化触发条件 → 降级任务永远不碰它们 → 本地留下「假6」，
+ * 虚增 countChannelsAtPriority(6) 把配额卡死（显示 4/4 满，实际 naci 优先级6几乎空着）。
+ *
+ * 本函数读取本地记为 >5（优先级6）的渠道在 naci 的真实优先级，不一致就同步本地。返回同步条数。
+ * 只读少量渠道（数量≈配额上限），每轮开销可忽略；读失败/已删的渠道跳过下轮重试。
+ */
+export async function reconcileTrackedPriorities(): Promise<number> {
+  const tracked = await listChannelsAbovePriority(DEMOTED_PRIORITY); // 本地 priority > 5
+  if (tracked.length === 0) return 0;
+  let fixed = 0;
+  const affected = new Set<string>();
+  for (const c of tracked) {
+    if (c.channelId == null) continue;
+    let naciPriority: number | null = null;
+    try {
+      const detail = await getChannel(c.channelId);
+      const p = Number((detail as { priority?: unknown }).priority);
+      naciPriority = Number.isFinite(p) ? p : null;
+    } catch {
+      continue; // naci 读失败（网络/已删）→ 本轮跳过
+    }
+    if (naciPriority == null || naciPriority === c.priority) continue;
+    try {
+      await updateCreatedChannelPriority(c.channelId, naciPriority);
+      fixed += 1;
+      affected.add(c.prefix);
+      await addLog({
+        level: "info",
+        actor: "engine",
+        channelName: c.prefix,
+        channelId: c.channelId,
+        message: `优先级对账：渠道 ${c.channelName} 本地 ${c.priority} → naci 实际 ${naciPriority}（修正本地缓存）`,
+      });
+    } catch {
+      // 更新失败：下轮重试
+    }
+  }
+  for (const p of affected) invalidateChannelCache(p);
+  return fixed;
 }
 
 /** 刷新某用户前缀的已建渠道实时缓存（供引擎定时刷新，让管理员列表 key 统计保持新鲜）。 */

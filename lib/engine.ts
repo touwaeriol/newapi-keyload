@@ -8,6 +8,7 @@
 import {
   createChannelsDrain,
   demoteAllDegradedChannels,
+  reconcileTrackedPriorities,
   refreshPrefixRealtime,
 } from "./channelService";
 import {
@@ -292,6 +293,16 @@ async function runPriorityTask(): Promise<void> {
     const cfg = await getConfig();
     state.priorityIntervalMs =
       clampPriorityTaskIntervalMinutes(cfg.priorityTaskIntervalMinutes) * 60_000;
+    // 先对账：把本地「假6」同步为 naci 真实优先级（naci 静默降级会留下漂移，卡死配额）。
+    // 对账后本地计数准确，退化降级只处理真正还在优先级6的渠道。
+    const reconciled = await reconcileTrackedPriorities();
+    if (reconciled > 0) {
+      await safeLog(
+        "info",
+        undefined,
+        `优先级任务：对账修正 ${reconciled} 个渠道的本地优先级（同步 naci 实际值，释放被假6占用的配额）`
+      );
+    }
     const demoted = await demoteAllDegradedChannels();
     if (demoted > 0) {
       await safeLog(
