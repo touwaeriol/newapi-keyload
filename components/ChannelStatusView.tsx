@@ -86,6 +86,10 @@ export interface ChannelStatus {
     limit: number | null;
     /** 该用户已建的优先级6渠道数 */
     used: number;
+    /** 全局已用的优先级6渠道数（跨所有用户） */
+    globalUsed?: number;
+    /** 全局优先级6上限 */
+    globalLimit?: number;
   } | null;
   /** 下一次定时检查时间（ISO 字符串） */
   nextCheckAt?: string | null;
@@ -407,6 +411,21 @@ function MiniStat({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
+/** 高优先级徽章色：全局满 或 用户独立配额满 → 红（无法再建优先级6）；否则蓝。 */
+function highPriorityTone(hp: {
+  limit: number | null;
+  used: number;
+  globalUsed?: number;
+  globalLimit?: number;
+}): "blue" | "rose" {
+  const globalFull =
+    hp.globalLimit != null &&
+    hp.globalUsed != null &&
+    hp.globalUsed >= hp.globalLimit;
+  const userFull = hp.limit != null && hp.used >= hp.limit;
+  return globalFull || userFull ? "rose" : "blue";
+}
+
 /**
  * 上传进度。术语：
  * 「录入」= 已保存到本系统数据库（本地库）；「上传」= 已建成渠道推送到 naci 站点。
@@ -437,12 +456,11 @@ function UploadProgress({ channel }: { channel: ChannelStatus }) {
           {hp != null &&
             (!hp.allowed ? (
               <Badge tone="slate">不可用高优先级</Badge>
-            ) : hp.limit != null ? (
-              <Badge tone={hp.used >= hp.limit ? "rose" : "blue"}>
-                高优先级 {hp.used}/{hp.limit}
-              </Badge>
             ) : (
-              <Badge tone="blue">高优先级 已用 {hp.used}</Badge>
+              <Badge tone={highPriorityTone(hp)}>
+                高优先级 全局 {hp.globalUsed ?? "?"}/{hp.globalLimit ?? "?"} · 我{" "}
+                {hp.limit != null ? `${hp.used}/${hp.limit}` : hp.used}
+              </Badge>
             ))}
           {limit != null &&
             (limit.unlimited ? (
