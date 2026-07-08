@@ -49,6 +49,15 @@ import type { User } from "./types";
 /** 单次「逐批建渠道」的渠道数硬上限（安全阀，防极端 paste 打爆 naci）。实际处理量由 maxKeys 控制。 */
 export const MAX_CHANNELS_PER_DRAIN = 500;
 
+/** 是否为「优先级 N 配额已满」错误（如「优先级6已达到最多6个启用渠道限制」）→ 需回退更低优先级。 */
+function isPriorityQuotaError(err: unknown): boolean {
+  const m = err instanceof Error ? err.message : String(err);
+  return (
+    m.includes("启用渠道限制") ||
+    (m.includes("优先级") && (m.includes("已达") || m.includes("上限")))
+  );
+}
+
 /** 单前缀最近一次检查结果（前端展示用）。 */
 export interface LastCheckView {
   at: string; // ISO
@@ -197,13 +206,37 @@ export async function createChannelFromNextBatch(
   }
 
   let channelId: number;
+  let usedPriority = FIXED_PRIORITY; // 实际使用的优先级（默认 6，配额满时回退 5）
   let publishSites: CreatedChannelSite[] = [];
   try {
-    const created = await createChannel({
-      name: alloc.channelName,
-      keyText,
-      models: cfg.models,
-    });
+    let created;
+    try {
+      created = await createChannel({
+        name: alloc.channelName,
+        keyText,
+        models: cfg.models,
+        priority: FIXED_PRIORITY,
+      });
+    } catch (err) {
+      // 优先级 6 配额已满（「优先级6已达到最多6个启用渠道限制」）→ 回退用优先级 5 创建
+      if (isPriorityQuotaError(err)) {
+        usedPriority = DEMOTED_PRIORITY;
+        created = await createChannel({
+          name: alloc.channelName,
+          keyText,
+          models: cfg.models,
+          priority: DEMOTED_PRIORITY,
+        });
+        await addLog({
+          level: "info",
+          actor: user.username,
+          channelName: alloc.channelName,
+          message: `优先级 ${FIXED_PRIORITY} 配额已满，改用优先级 ${DEMOTED_PRIORITY} 创建`,
+        });
+      } else {
+        throw err;
+      }
+    }
     channelId = created.id;
     // 建渠道即已发布并自动启用站点调度，无需再调 reenableAllSites（旧「手动打开调度」逻辑已移除）。
     // 各站远程渠道 id（publish_results）→ 落库入参（只留拿到 remote id 的站）
@@ -229,7 +262,7 @@ export async function createChannelFromNextBatch(
     await finalizeCreatedChannel(alloc.id, {
       channelId,
       keyCount: cleanKeys.length,
-      priority: FIXED_PRIORITY,
+      priority: usedPriority,
     });
     if (publishSites.length > 0) {
       await recordCreatedChannelSites(alloc.id, publishSites);
@@ -607,11 +640,16 @@ export async function demoteDegradedChannels(user: User): Promise<number> {
     const st = statusMap.get(c.channelId as number);
     if (!st) continue;
     const siteStatus = new Map(st.sites.map((s) => [s.site_id, s.status]));
-    const degraded = DEMOTE_TRIGGER_SITE_IDS.some((sid) => {
+    // 触发条件（满足其一即降级）：
+    // 1) 渠道级自动禁用：有 key 但可用为 0（naci 列表显示「自动禁用 0/N」）；
+    // 2) 站点级退化：AC(6)/61(21) 任一为禁用(2)/自动禁用(3)（忽略结构性未打开的 AGT/13）。
+    const channelExhausted =
+      st.hasKeyInfo && st.multiKeySize > 0 && st.aliveCount === 0;
+    const siteDegraded = DEMOTE_TRIGGER_SITE_IDS.some((sid) => {
       const s = siteStatus.get(sid);
       return s === 2 || s === 3;
     });
-    if (!degraded) continue;
+    if (!channelExhausted && !siteDegraded) continue;
 
     try {
       await setChannelPriority(c.channelId as number, DEMOTED_PRIORITY);

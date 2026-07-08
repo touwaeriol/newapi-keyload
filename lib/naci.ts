@@ -306,6 +306,7 @@ export async function createChannel(params: {
   name: string;
   keyText: string; // 已用 \n 连接的多 key
   models?: string; // 模型列表（管理员可配）；缺省用模板默认
+  priority?: number; // 优先级；缺省用模板默认（FIXED_PRIORITY）
 }): Promise<NaciChannel & { publishResults: PublishResult[] }> {
   const channelObj: Record<string, unknown> = {
     ...CHANNEL_JSON_TEMPLATE,
@@ -314,6 +315,9 @@ export async function createChannel(params: {
     key_mode: "append",
     ...(params.models && params.models.trim()
       ? { models: params.models.trim() }
+      : {}),
+    ...(typeof params.priority === "number"
+      ? { priority: params.priority }
       : {}),
   };
   // 注意：受限供应商账号（channel_site_config:false）无权自定义站点分组，
