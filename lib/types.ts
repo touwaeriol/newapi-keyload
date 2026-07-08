@@ -32,8 +32,10 @@ export interface SystemConfig {
   naciPassword?: string;
   /** 旧 new-api 兼容端点的 Bearer token（可选；转向 admin-hub 后保留兼容，非必填） */
   naciToken?: string;
-  /** 定时引擎每批从本地 key 池取出并上传的数量（1~1000） */
+  /** 聚合 key 数量：每个新建渠道里聚合多少个 key（1~1000）。 */
   uploadBatchSize: number;
+  /** 每批处理数量：定时任务每轮 / 直接上传每次处理多少个 key，拆成 ⌈处理数/聚合数⌉ 个渠道（1~10000）。 */
+  processBatchSize: number;
   /** 是否启用自动补 key（定时引擎每 N 分钟从本地池按需补给） */
   autoRefillEnabled: boolean;
   /** 定时引擎补给间隔（分钟，1~1440）；改动下一轮生效，无需重启 */

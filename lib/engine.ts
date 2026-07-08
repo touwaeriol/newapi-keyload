@@ -8,7 +8,6 @@
 import {
   createChannelsDrain,
   refreshPrefixRealtime,
-  MAX_CHANNELS_PER_DRAIN,
 } from "./channelService";
 import {
   channelsWithPending,
@@ -23,8 +22,6 @@ import {
 /** 补给间隔默认值（分钟）——首个 tick 读到配置前的兜底，与 store 的 seed 一致。 */
 const DEFAULT_INTERVAL_MS = 60_000;
 const INITIAL_DELAY_MS = 5_000;
-/** 单轮单前缀最多自动新建的渠道数（防止一次 paste 太多把 naci 打爆）。与直传共用同一上限。 */
-const MAX_CHANNELS_PER_TICK = MAX_CHANNELS_PER_DRAIN;
 /** claimed 死行回收阈值（分钟）：超过则视为进程崩溃残留，退回 pending 重试。 */
 const CLAIM_STALE_MINUTES = 10;
 
@@ -112,7 +109,8 @@ async function safeLog(
  */
 async function processPrefix(
   prefix: string,
-  autoRefill: boolean
+  autoRefill: boolean,
+  processBatchSize: number
 ): Promise<void> {
   try {
     const user = await findUserByChannelName(prefix);
@@ -125,7 +123,8 @@ async function processPrefix(
     const { pending } = await poolCounts(prefix);
 
     if (pending > 0 && autoRefill) {
-      const drain = await createChannelsDrain(user, MAX_CHANNELS_PER_TICK);
+      // 本轮最多处理 processBatchSize 个 key（拆成 ⌈processBatchSize/聚合数⌉ 个渠道）
+      const drain = await createChannelsDrain(user, processBatchSize);
       if (drain.createdChannels > 0) {
         recordResult(
           prefix,
@@ -179,6 +178,7 @@ export async function tick(): Promise<void> {
     const cfg = await getConfig();
     state.intervalMs = clampIntervalMinutes(cfg.refillIntervalMinutes) * 60_000;
     const autoRefill = cfg.autoRefillEnabled;
+    const processBatchSize = cfg.processBatchSize;
 
     // 回收崩溃残留的 claimed 死行（退回 pending），再统计待处理前缀。
     try {
@@ -201,7 +201,7 @@ export async function tick(): Promise<void> {
     );
 
     for (const prefix of targets) {
-      await processPrefix(prefix, autoRefill);
+      await processPrefix(prefix, autoRefill, processBatchSize);
     }
   } catch (err) {
     console.error("[engine] tick 失败:", err);
@@ -226,7 +226,7 @@ export function kickEngine(prefix: string): void {
     state.lastTickAt = Date.now();
     try {
       const cfg = await getConfig();
-      await processPrefix(name, cfg.autoRefillEnabled);
+      await processPrefix(name, cfg.autoRefillEnabled, cfg.processBatchSize);
     } catch (err) {
       console.error("[engine] kick 失败:", err);
     } finally {

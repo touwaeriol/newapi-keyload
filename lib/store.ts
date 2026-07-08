@@ -14,15 +14,24 @@ const SEED_NACI_TOKEN = "";
 const SEED_NACI_USERNAME = "";
 const SEED_NACI_PASSWORD = "";
 // 定时补 key 引擎默认参数（可在系统配置中调整）
-const SEED_UPLOAD_BATCH_SIZE = 20;
+const SEED_UPLOAD_BATCH_SIZE = 20; // 聚合 key 数量（每渠道）
+const SEED_PROCESS_BATCH_SIZE = 20; // 每批处理数量（每轮/每次处理多少 key）
 const SEED_AUTO_REFILL_ENABLED = true;
 const SEED_REFILL_INTERVAL_MINUTES = 1;
 
-/** 每批上传数量合法区间钳制（1~1000） */
+/** 聚合 key 数量合法区间钳制（1~1000，每渠道聚合多少 key） */
 export function clampBatchSize(n: unknown): number {
   const v = Math.floor(Number(n));
   if (!Number.isFinite(v) || v < 1) return SEED_UPLOAD_BATCH_SIZE;
   if (v > 1000) return 1000;
+  return v;
+}
+
+/** 每批处理数量合法区间钳制（1~10000，每轮/每次处理多少 key） */
+export function clampProcessBatchSize(n: unknown): number {
+  const v = Math.floor(Number(n));
+  if (!Number.isFinite(v) || v < 1) return SEED_PROCESS_BATCH_SIZE;
+  if (v > 10000) return 10000;
   return v;
 }
 
@@ -106,6 +115,10 @@ async function createTables(pool: Pool): Promise<void> {
   // 兼容已存在的线上库：新增定时补 key 引擎配置（带默认值，不破坏旧数据）。
   await pool.query(
     `ALTER TABLE config ADD COLUMN IF NOT EXISTS upload_batch_size int NOT NULL DEFAULT 20`
+  );
+  // 每批处理数量（每轮/每次处理多少 key）；旧库默认取聚合数量，保持行为不变。
+  await pool.query(
+    `ALTER TABLE config ADD COLUMN IF NOT EXISTS process_batch_size int NOT NULL DEFAULT 20`
   );
   await pool.query(
     `ALTER TABLE config ADD COLUMN IF NOT EXISTS auto_refill_enabled boolean NOT NULL DEFAULT true`
@@ -390,10 +403,11 @@ export async function getConfig(): Promise<SystemConfig> {
     naci_username: string;
     naci_password: string;
     upload_batch_size: number;
+    process_batch_size: number;
     auto_refill_enabled: boolean;
     refill_interval_minutes: number;
   }>(
-    "SELECT naci_base_url, naci_token, naci_username, naci_password, upload_batch_size, auto_refill_enabled, refill_interval_minutes FROM config WHERE id = 1"
+    "SELECT naci_base_url, naci_token, naci_username, naci_password, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes FROM config WHERE id = 1"
   );
   if (!rows[0]) {
     return {
@@ -402,6 +416,7 @@ export async function getConfig(): Promise<SystemConfig> {
       naciUsername: SEED_NACI_USERNAME,
       naciPassword: SEED_NACI_PASSWORD,
       uploadBatchSize: SEED_UPLOAD_BATCH_SIZE,
+      processBatchSize: SEED_PROCESS_BATCH_SIZE,
       autoRefillEnabled: SEED_AUTO_REFILL_ENABLED,
       refillIntervalMinutes: SEED_REFILL_INTERVAL_MINUTES,
     };
@@ -412,6 +427,7 @@ export async function getConfig(): Promise<SystemConfig> {
     naciUsername: rows[0].naci_username,
     naciPassword: rows[0].naci_password,
     uploadBatchSize: clampBatchSize(rows[0].upload_batch_size),
+    processBatchSize: clampProcessBatchSize(rows[0].process_batch_size),
     autoRefillEnabled: Boolean(rows[0].auto_refill_enabled),
     refillIntervalMinutes: clampIntervalMinutes(rows[0].refill_interval_minutes),
   };
@@ -420,14 +436,15 @@ export async function getConfig(): Promise<SystemConfig> {
 export async function saveConfig(cfg: SystemConfig): Promise<void> {
   const pool = await ensureReady();
   await pool.query(
-    `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password, upload_batch_size, auto_refill_enabled, refill_interval_minutes)
-     VALUES (1, $1, $2, $3, $4, $5, $6, $7)
+    `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes)
+     VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8)
      ON CONFLICT (id) DO UPDATE SET
        naci_base_url = EXCLUDED.naci_base_url,
        naci_token = EXCLUDED.naci_token,
        naci_username = EXCLUDED.naci_username,
        naci_password = EXCLUDED.naci_password,
        upload_batch_size = EXCLUDED.upload_batch_size,
+       process_batch_size = EXCLUDED.process_batch_size,
        auto_refill_enabled = EXCLUDED.auto_refill_enabled,
        refill_interval_minutes = EXCLUDED.refill_interval_minutes`,
     [
@@ -436,6 +453,7 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
       cfg.naciUsername ?? "",
       cfg.naciPassword ?? "",
       clampBatchSize(cfg.uploadBatchSize),
+      clampProcessBatchSize(cfg.processBatchSize),
       cfg.autoRefillEnabled ?? SEED_AUTO_REFILL_ENABLED,
       clampIntervalMinutes(cfg.refillIntervalMinutes),
     ]

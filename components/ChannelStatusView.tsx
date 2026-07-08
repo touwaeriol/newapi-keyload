@@ -62,7 +62,7 @@ export interface ChannelStatus {
   poolPending?: number;
   /** 本地队列中已上传的 key 数 */
   poolUploaded?: number;
-  /** 定时引擎每批上传数量（管理员配置） */
+  /** 每渠道聚合 key 数量（管理员配置） */
   uploadBatchSize?: number;
   /** 是否启用自动补 key */
   autoRefillEnabled?: boolean;
@@ -457,8 +457,8 @@ function UploadProgress({ channel }: { channel: ChannelStatus }) {
       {/* 每批数量 + 下一次检查 + 预计 */}
       <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
         <span>
-          每批上传：
-          <span className="font-medium text-slate-700">{batch || "-"}</span> 个/次
+          每渠道聚合：
+          <span className="font-medium text-slate-700">{batch || "-"}</span> 个 key
         </span>
         <span>
           下一次检查：

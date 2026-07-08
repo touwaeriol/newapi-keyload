@@ -17,6 +17,7 @@ export async function GET(req: NextRequest) {
       hasNaciPassword: Boolean(cfg.naciPassword),
       hasNaciToken: Boolean(cfg.naciToken),
       uploadBatchSize: cfg.uploadBatchSize,
+      processBatchSize: cfg.processBatchSize,
       autoRefillEnabled: cfg.autoRefillEnabled,
       refillIntervalMinutes: cfg.refillIntervalMinutes,
     });
@@ -36,6 +37,7 @@ export async function PUT(req: NextRequest) {
       naciPassword?: string;
       naciToken?: string;
       uploadBatchSize?: number;
+      processBatchSize?: number;
       autoRefillEnabled?: boolean;
       refillIntervalMinutes?: number;
     };
@@ -57,6 +59,11 @@ export async function PUT(req: NextRequest) {
       body.uploadBatchSize == null
         ? current.uploadBatchSize
         : body.uploadBatchSize;
+    // 未传则保留原值；由 store.saveConfig 内部钳制到 1~10000
+    const processBatchSize =
+      body.processBatchSize == null
+        ? current.processBatchSize
+        : body.processBatchSize;
     const autoRefillEnabled =
       typeof body.autoRefillEnabled === "boolean"
         ? body.autoRefillEnabled
@@ -73,6 +80,7 @@ export async function PUT(req: NextRequest) {
       naciPassword,
       naciToken,
       uploadBatchSize,
+      processBatchSize,
       autoRefillEnabled,
       refillIntervalMinutes,
     });
@@ -84,6 +92,7 @@ export async function PUT(req: NextRequest) {
       hasNaciPassword: Boolean(naciPassword),
       hasNaciToken: Boolean(naciToken),
       uploadBatchSize: saved.uploadBatchSize,
+      processBatchSize: saved.processBatchSize,
       autoRefillEnabled: saved.autoRefillEnabled,
       refillIntervalMinutes: saved.refillIntervalMinutes,
     });

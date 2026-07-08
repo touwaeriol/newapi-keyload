@@ -49,8 +49,10 @@ interface ConfigResponse {
   naciBaseUrl: string;
   naciUsername: string;
   hasNaciPassword: boolean;
-  /** 每批上传数量（定时引擎每轮从队列取的批量大小） */
+  /** 聚合 key 数量：每个新建渠道聚合多少个 key */
   uploadBatchSize: number;
+  /** 每批处理数量：每轮/每次处理多少个 key */
+  processBatchSize: number;
   /** 是否启用自动补 key（按间隔从本地队列批量上传） */
   autoRefillEnabled: boolean;
   /** 定时引擎补给间隔（分钟，1~1440） */
@@ -58,6 +60,7 @@ interface ConfigResponse {
 }
 
 const DEFAULT_BATCH_SIZE = 20;
+const DEFAULT_PROCESS_BATCH = 20;
 const DEFAULT_INTERVAL_MINUTES = 1;
 
 function ConfigCard() {
@@ -67,6 +70,7 @@ function ConfigCard() {
   const [password, setPassword] = useState("");
   const [hasPassword, setHasPassword] = useState(false);
   const [batchSize, setBatchSize] = useState<number>(DEFAULT_BATCH_SIZE);
+  const [processBatch, setProcessBatch] = useState<number>(DEFAULT_PROCESS_BATCH);
   const [intervalMin, setIntervalMin] = useState<number>(
     DEFAULT_INTERVAL_MINUTES
   );
@@ -97,6 +101,11 @@ function ConfigCard() {
           ? data.uploadBatchSize
           : DEFAULT_BATCH_SIZE
       );
+      setProcessBatch(
+        typeof data.processBatchSize === "number" && data.processBatchSize > 0
+          ? data.processBatchSize
+          : DEFAULT_PROCESS_BATCH
+      );
       setIntervalMin(
         typeof data.refillIntervalMinutes === "number" &&
           data.refillIntervalMinutes > 0
@@ -123,10 +132,15 @@ function ConfigCard() {
       toast.error("naciBaseUrl 不能为空");
       return;
     }
-    // 每批数量夹到 1~1000
+    // 聚合 key 数量夹到 1~1000
     const safeBatch = Math.min(
       1000,
       Math.max(1, Math.round(Number(batchSize) || DEFAULT_BATCH_SIZE))
+    );
+    // 每批处理数量夹到 1~10000
+    const safeProcess = Math.min(
+      10000,
+      Math.max(1, Math.round(Number(processBatch) || DEFAULT_PROCESS_BATCH))
     );
     // 补给间隔夹到 1~1440 分钟
     const safeInterval = Math.min(
@@ -143,6 +157,7 @@ function ConfigCard() {
           naciUsername: username.trim(),
           naciPassword: password,
           uploadBatchSize: safeBatch,
+          processBatchSize: safeProcess,
           autoRefillEnabled: autoRefill,
           refillIntervalMinutes: safeInterval,
         }),
@@ -231,10 +246,10 @@ function ConfigCard() {
             </Field>
           </div>
 
-          <div className="grid gap-3 md:grid-cols-3">
+          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
             <Field
-              label="每批上传数量"
-              hint="后端每轮从本地库批量上传到站点，每批 N 个，上传后自动启用三站"
+              label="聚合 key 数量"
+              hint="每个新建渠道里聚合多少个 key（1~1000）"
             >
               <TextInput
                 type="number"
@@ -243,6 +258,19 @@ function ConfigCard() {
                 value={Number.isNaN(batchSize) ? "" : batchSize}
                 onChange={(e) => setBatchSize(e.target.valueAsNumber)}
                 placeholder={String(DEFAULT_BATCH_SIZE)}
+              />
+            </Field>
+            <Field
+              label="每批处理数量"
+              hint="每轮/每次处理多少个 key，拆成 ⌈处理数/聚合数⌉ 个渠道（1~10000）"
+            >
+              <TextInput
+                type="number"
+                min={1}
+                max={10000}
+                value={Number.isNaN(processBatch) ? "" : processBatch}
+                onChange={(e) => setProcessBatch(e.target.valueAsNumber)}
+                placeholder={String(DEFAULT_PROCESS_BATCH)}
               />
             </Field>
             <Field

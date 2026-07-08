@@ -37,8 +37,8 @@ import {
 } from "./store";
 import type { User } from "./types";
 
-/** 单前缀单次「逐批建渠道」最多新建的渠道数（防一次 paste 太多把 naci 打爆）。引擎与直传共用。 */
-export const MAX_CHANNELS_PER_DRAIN = 20;
+/** 单次「逐批建渠道」的渠道数硬上限（安全阀，防极端 paste 打爆 naci）。实际处理量由 maxKeys 控制。 */
+export const MAX_CHANNELS_PER_DRAIN = 500;
 
 /** 单前缀最近一次检查结果（前端展示用）。 */
 export interface LastCheckView {
@@ -266,12 +266,13 @@ export async function createChannelFromNextBatch(
 }
 
 /**
- * 把某用户池里的 pending key 逐批建成新渠道，直到池排空或达到单次上限 cap。
- * 供「直接上传」（用户主动一次性清空）与定时引擎（自动补给）复用。
+ * 把某用户池里的 pending key 处理成新渠道：每个渠道聚合 uploadBatchSize 个 key，
+ * 本次最多处理 maxKeys 个 key（=「每批处理数量」），池排空或达到 maxKeys / 硬安全阀即停。
+ * 供「直接上传」与定时引擎复用，两者都传 cfg.processBatchSize 作为 maxKeys。
  */
 export async function createChannelsDrain(
   user: User,
-  cap = MAX_CHANNELS_PER_DRAIN
+  maxKeys: number
 ): Promise<{
   createdChannels: number;
   pushed: number;
@@ -281,7 +282,8 @@ export async function createChannelsDrain(
   let createdChannels = 0;
   let pushed = 0;
   let last: CreateBatchResult | null = null;
-  for (let i = 0; i < cap; i++) {
+  for (let i = 0; i < MAX_CHANNELS_PER_DRAIN; i++) {
+    if (pushed >= maxKeys) break; // 本次已处理够「每批处理数量」个 key
     const r = await createChannelFromNextBatch(user);
     last = r;
     if (!r.created) break;
@@ -336,7 +338,8 @@ export async function directUploadKeys(
   }
 
   const { added } = await addKeysToPool(prefix, cleanKeys);
-  const drain = await createChannelsDrain(user);
+  const cfg = await getConfig();
+  const drain = await createChannelsDrain(user, cfg.processBatchSize);
 
   await addLog({
     level: "info",
