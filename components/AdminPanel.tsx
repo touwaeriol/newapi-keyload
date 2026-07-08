@@ -59,11 +59,20 @@ interface ConfigResponse {
   autoRefillEnabled: boolean;
   /** 定时引擎补给间隔（分钟，1~1440） */
   refillIntervalMinutes: number;
+  /** 优先级 6 渠道数量上限（本地检测配额，0~1000） */
+  priority6Limit: number;
+  /** 优先级降级全局任务间隔（分钟，1~1440） */
+  priorityTaskIntervalMinutes: number;
+  /** 僵尸/退化判定宽限期（分钟，0~1440） */
+  demoteGraceMinutes: number;
 }
 
 const DEFAULT_BATCH_SIZE = 20;
 const DEFAULT_PROCESS_BATCH = 20;
 const DEFAULT_INTERVAL_MINUTES = 1;
+const DEFAULT_PRIORITY6_LIMIT = 6;
+const DEFAULT_PRIORITY_TASK_INTERVAL = 5;
+const DEFAULT_DEMOTE_GRACE = 5;
 const DEFAULT_MODELS = "claude-opus-4-6,claude-opus-4-7,claude-opus-4-8";
 
 function ConfigCard() {
@@ -78,6 +87,13 @@ function ConfigCard() {
   const [intervalMin, setIntervalMin] = useState<number>(
     DEFAULT_INTERVAL_MINUTES
   );
+  const [priority6Limit, setPriority6Limit] = useState<number>(
+    DEFAULT_PRIORITY6_LIMIT
+  );
+  const [priorityTaskInterval, setPriorityTaskInterval] = useState<number>(
+    DEFAULT_PRIORITY_TASK_INTERVAL
+  );
+  const [demoteGrace, setDemoteGrace] = useState<number>(DEFAULT_DEMOTE_GRACE);
   const [autoRefill, setAutoRefill] = useState(true);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -121,6 +137,23 @@ function ConfigCard() {
           ? data.refillIntervalMinutes
           : DEFAULT_INTERVAL_MINUTES
       );
+      setPriority6Limit(
+        typeof data.priority6Limit === "number" && data.priority6Limit >= 0
+          ? data.priority6Limit
+          : DEFAULT_PRIORITY6_LIMIT
+      );
+      setPriorityTaskInterval(
+        typeof data.priorityTaskIntervalMinutes === "number" &&
+          data.priorityTaskIntervalMinutes > 0
+          ? data.priorityTaskIntervalMinutes
+          : DEFAULT_PRIORITY_TASK_INTERVAL
+      );
+      setDemoteGrace(
+        typeof data.demoteGraceMinutes === "number" &&
+          data.demoteGraceMinutes >= 0
+          ? data.demoteGraceMinutes
+          : DEFAULT_DEMOTE_GRACE
+      );
       setAutoRefill(Boolean(data.autoRefillEnabled));
       setPassword("");
     } catch (err) {
@@ -156,6 +189,24 @@ function ConfigCard() {
       1440,
       Math.max(1, Math.round(Number(intervalMin) || DEFAULT_INTERVAL_MINUTES))
     );
+    // 优先级6上限夹到 0~1000（允许 0=永不用优先级6，故不能用 || 兜底）
+    const p6raw = Number(priority6Limit);
+    const safeP6 = Number.isNaN(p6raw)
+      ? DEFAULT_PRIORITY6_LIMIT
+      : Math.min(1000, Math.max(0, Math.round(p6raw)));
+    // 优先级降级任务间隔夹到 1~1440 分钟
+    const safePriInterval = Math.min(
+      1440,
+      Math.max(
+        1,
+        Math.round(Number(priorityTaskInterval) || DEFAULT_PRIORITY_TASK_INTERVAL)
+      )
+    );
+    // 宽限期夹到 0~1440 分钟（允许 0=建后即可判定，故不能用 || 兜底）
+    const graceRaw = Number(demoteGrace);
+    const safeGrace = Number.isNaN(graceRaw)
+      ? DEFAULT_DEMOTE_GRACE
+      : Math.min(1440, Math.max(0, Math.round(graceRaw)));
     setSaving(true);
     try {
       // naciPassword 留空 = 保持原密码不变（后端约定）
@@ -170,6 +221,9 @@ function ConfigCard() {
           processBatchSize: safeProcess,
           autoRefillEnabled: autoRefill,
           refillIntervalMinutes: safeInterval,
+          priority6Limit: safeP6,
+          priorityTaskIntervalMinutes: safePriInterval,
+          demoteGraceMinutes: safeGrace,
         }),
       });
       toast.success("配置已保存");
@@ -307,6 +361,49 @@ function ConfigCard() {
                 value={Number.isNaN(intervalMin) ? "" : intervalMin}
                 onChange={(e) => setIntervalMin(e.target.valueAsNumber)}
                 placeholder={String(DEFAULT_INTERVAL_MINUTES)}
+              />
+            </Field>
+            <Field
+              label="优先级6渠道上限"
+              hint="本地已建优先级6渠道达到此数即改用优先级5创建（账号配额6，0~1000）"
+            >
+              <TextInput
+                type="number"
+                min={0}
+                max={1000}
+                value={Number.isNaN(priority6Limit) ? "" : priority6Limit}
+                onChange={(e) => setPriority6Limit(e.target.valueAsNumber)}
+                placeholder={String(DEFAULT_PRIORITY6_LIMIT)}
+              />
+            </Field>
+            <Field
+              label="优先级降级间隔（分钟）"
+              hint="全局定时任务每 N 分钟扫描退化渠道并降到优先级5，腾出配额，1~1440"
+            >
+              <TextInput
+                type="number"
+                min={1}
+                max={1440}
+                value={
+                  Number.isNaN(priorityTaskInterval) ? "" : priorityTaskInterval
+                }
+                onChange={(e) =>
+                  setPriorityTaskInterval(e.target.valueAsNumber)
+                }
+                placeholder={String(DEFAULT_PRIORITY_TASK_INTERVAL)}
+              />
+            </Field>
+            <Field
+              label="僵尸判定宽限期（分钟）"
+              hint="渠道建后超过此时长才纳入降级判定，避免刚建误判；0=建后即判，0~1440"
+            >
+              <TextInput
+                type="number"
+                min={0}
+                max={1440}
+                value={Number.isNaN(demoteGrace) ? "" : demoteGrace}
+                onChange={(e) => setDemoteGrace(e.target.valueAsNumber)}
+                placeholder={String(DEFAULT_DEMOTE_GRACE)}
               />
             </Field>
             <Field

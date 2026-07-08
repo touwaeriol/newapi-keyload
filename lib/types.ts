@@ -42,6 +42,21 @@ export interface SystemConfig {
   autoRefillEnabled: boolean;
   /** 定时引擎补给间隔（分钟，1~1440）；改动下一轮生效，无需重启 */
   refillIntervalMinutes: number;
+  /**
+   * 优先级 6 渠道数量上限（naci 账号配额，默认 6）。建渠道前**本地**统计已建优先级 6 渠道数，
+   * 达到此上限即直接用优先级 5 创建，避免服务器返回「优先级6已达到最多6个启用渠道限制」。
+   */
+  priority6Limit: number;
+  /**
+   * 优先级降级定时任务间隔（分钟，1~1440）：**全局**单任务定期扫描所有退化渠道并从 6 降到 5，
+   * 腾出优先级 6 配额；不再每个渠道/前缀每轮各自处理。
+   */
+  priorityTaskIntervalMinutes: number;
+  /**
+   * 僵尸/退化判定宽限期（分钟，0~1440）：渠道创建后需超过此时长才纳入降级判定，
+   * 避免刚建、站点尚未就绪时被误判降级。0=不设宽限，建后即可被判定。
+   */
+  demoteGraceMinutes: number;
 }
 
 export type LogLevel = "info" | "success" | "warn" | "error";

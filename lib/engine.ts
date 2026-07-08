@@ -7,12 +7,13 @@
 // 引擎内任何异常都被捕获，绝不让 tick 抛出而中断定时器或 crash 进程。
 import {
   createChannelsDrain,
-  demoteDegradedChannels,
+  demoteAllDegradedChannels,
   refreshPrefixRealtime,
 } from "./channelService";
 import {
   channelsWithPending,
   clampIntervalMinutes,
+  clampPriorityTaskIntervalMinutes,
   findUserByChannelName,
   getConfig,
   poolCounts,
@@ -23,6 +24,10 @@ import {
 /** 补给间隔默认值（分钟）——首个 tick 读到配置前的兜底，与 store 的 seed 一致。 */
 const DEFAULT_INTERVAL_MS = 60_000;
 const INITIAL_DELAY_MS = 5_000;
+/** 优先级降级全局任务默认间隔（ms）——首轮读到配置前的兜底，与 store seed(5 分钟)一致。 */
+const DEFAULT_PRIORITY_INTERVAL_MS = 5 * 60_000;
+/** 优先级降级任务首次延迟（ms）：错开补给引擎首轮，避开建渠道与降级同时抢 naci。 */
+const PRIORITY_INITIAL_DELAY_MS = 20_000;
 /** claimed 死行回收阈值（分钟）：超过则视为进程崩溃残留，退回 pending 重试。 */
 const CLAIM_STALE_MINUTES = 10;
 
@@ -41,6 +46,11 @@ interface EngineState {
   nextTickAt: number | null; // 预计下次调度时间戳(ms)
   intervalMs: number; // 当前生效的补给间隔(ms)，每轮 tick 从配置刷新
   lastResults: Record<string, LastCheckResult>; // 按前缀记录最近一次检查结果
+  // —— 优先级降级全局任务（独立自调度定时器，间隔由 priorityTaskIntervalMinutes 配置） ——
+  priorityRunning: boolean; // 防重入
+  priorityTimer: ReturnType<typeof setTimeout> | null;
+  priorityIntervalMs: number; // 当前生效的降级任务间隔(ms)
+  lastPriorityRunAt: number | null; // 上次降级任务完成时间戳(ms)
 }
 
 function engineState(): EngineState {
@@ -54,11 +64,17 @@ function engineState(): EngineState {
       nextTickAt: null,
       intervalMs: DEFAULT_INTERVAL_MS,
       lastResults: {},
+      priorityRunning: false,
+      priorityTimer: null,
+      priorityIntervalMs: DEFAULT_PRIORITY_INTERVAL_MS,
+      lastPriorityRunAt: null,
     };
   } else {
     if (!g.__keyloadEngine.lastResults) g.__keyloadEngine.lastResults = {};
     if (!g.__keyloadEngine.intervalMs)
       g.__keyloadEngine.intervalMs = DEFAULT_INTERVAL_MS;
+    if (!g.__keyloadEngine.priorityIntervalMs)
+      g.__keyloadEngine.priorityIntervalMs = DEFAULT_PRIORITY_INTERVAL_MS;
   }
   return g.__keyloadEngine;
 }
@@ -121,16 +137,8 @@ async function processPrefix(
       return;
     }
 
-    // 每轮先做退化降级（把站点退化的渠道从优先级 6 降到 5，腾出配额）
-    try {
-      await demoteDegradedChannels(user);
-    } catch (err) {
-      await safeLog(
-        "error",
-        prefix,
-        `降级检查失败：${err instanceof Error ? err.message : String(err)}`
-      );
-    }
+    // 注：退化降级已抽出为**全局单一定时任务**（runPriorityTaskAndReschedule），
+    // 不再在此每前缀/每轮各自处理。
 
     const { pending } = await poolCounts(prefix);
 
@@ -264,6 +272,51 @@ async function runAndReschedule(): Promise<void> {
   }
 }
 
+/**
+ * 全局优先级降级任务：一次扫描所有前缀的退化渠道并从 6 降到 5（腾出优先级配额）。
+ * 独立于补给引擎，间隔由 priorityTaskIntervalMinutes 配置；priorityRunning 防重入。
+ */
+async function runPriorityTask(): Promise<void> {
+  const state = engineState();
+  if (state.priorityRunning) return;
+  state.priorityRunning = true;
+  try {
+    const cfg = await getConfig();
+    state.priorityIntervalMs =
+      clampPriorityTaskIntervalMinutes(cfg.priorityTaskIntervalMinutes) * 60_000;
+    const demoted = await demoteAllDegradedChannels();
+    if (demoted > 0) {
+      await safeLog(
+        "info",
+        undefined,
+        `优先级任务：本轮降级 ${demoted} 个退化渠道（6→5，腾出优先级配额）`
+      );
+    }
+  } catch (err) {
+    console.error("[engine] 优先级降级任务失败:", err);
+  } finally {
+    state.priorityRunning = false;
+    state.lastPriorityRunAt = Date.now();
+  }
+}
+
+/** 跑一次优先级降级任务并按当前生效间隔安排下一次（自调度 setTimeout 链）。 */
+async function runPriorityAndReschedule(): Promise<void> {
+  const state = engineState();
+  try {
+    await runPriorityTask();
+  } finally {
+    const delay =
+      state.priorityIntervalMs > 0
+        ? state.priorityIntervalMs
+        : DEFAULT_PRIORITY_INTERVAL_MS;
+    if (state.priorityTimer) clearTimeout(state.priorityTimer);
+    state.priorityTimer = setTimeout(() => {
+      void runPriorityAndReschedule();
+    }, delay);
+  }
+}
+
 /** 启动定时引擎（幂等，重复调用只启动一次）。 */
 export function startEngine(): void {
   const state = engineState();
@@ -275,5 +328,12 @@ export function startEngine(): void {
     void runAndReschedule();
   }, INITIAL_DELAY_MS);
 
-  console.log("[engine] 定时建渠道引擎已启动（间隔按系统配置，可在后台调整）");
+  // 全局优先级降级任务（独立定时器，错开补给首轮）
+  state.priorityTimer = setTimeout(() => {
+    void runPriorityAndReschedule();
+  }, PRIORITY_INITIAL_DELAY_MS);
+
+  console.log(
+    "[engine] 定时建渠道引擎 + 全局优先级降级任务已启动（间隔均按系统配置，可在后台调整）"
+  );
 }

@@ -21,6 +21,9 @@ export async function GET(req: NextRequest) {
       processBatchSize: cfg.processBatchSize,
       autoRefillEnabled: cfg.autoRefillEnabled,
       refillIntervalMinutes: cfg.refillIntervalMinutes,
+      priority6Limit: cfg.priority6Limit,
+      priorityTaskIntervalMinutes: cfg.priorityTaskIntervalMinutes,
+      demoteGraceMinutes: cfg.demoteGraceMinutes,
     });
   } catch (err) {
     return errorResponse(err);
@@ -42,6 +45,9 @@ export async function PUT(req: NextRequest) {
       processBatchSize?: number;
       autoRefillEnabled?: boolean;
       refillIntervalMinutes?: number;
+      priority6Limit?: number;
+      priorityTaskIntervalMinutes?: number;
+      demoteGraceMinutes?: number;
     };
     const naciBaseUrl = (body.naciBaseUrl ?? "").trim();
     if (!naciBaseUrl) return fail("naciBaseUrl 不能为空");
@@ -80,6 +86,21 @@ export async function PUT(req: NextRequest) {
       body.refillIntervalMinutes == null
         ? current.refillIntervalMinutes
         : body.refillIntervalMinutes;
+    // 未传则保留原值；由 store.saveConfig 内部钳制到 0~1000
+    const priority6Limit =
+      body.priority6Limit == null
+        ? current.priority6Limit
+        : body.priority6Limit;
+    // 未传则保留原值；由 store.saveConfig 内部钳制到 1~1440 分钟
+    const priorityTaskIntervalMinutes =
+      body.priorityTaskIntervalMinutes == null
+        ? current.priorityTaskIntervalMinutes
+        : body.priorityTaskIntervalMinutes;
+    // 未传则保留原值；由 store.saveConfig 内部钳制到 0~1440 分钟
+    const demoteGraceMinutes =
+      body.demoteGraceMinutes == null
+        ? current.demoteGraceMinutes
+        : body.demoteGraceMinutes;
 
     await saveConfig({
       naciBaseUrl,
@@ -91,6 +112,9 @@ export async function PUT(req: NextRequest) {
       processBatchSize,
       autoRefillEnabled,
       refillIntervalMinutes,
+      priority6Limit,
+      priorityTaskIntervalMinutes,
+      demoteGraceMinutes,
     });
     // 回读钳制后的最终值返回
     const saved = await getConfig();
@@ -104,6 +128,9 @@ export async function PUT(req: NextRequest) {
       processBatchSize: saved.processBatchSize,
       autoRefillEnabled: saved.autoRefillEnabled,
       refillIntervalMinutes: saved.refillIntervalMinutes,
+      priority6Limit: saved.priority6Limit,
+      priorityTaskIntervalMinutes: saved.priorityTaskIntervalMinutes,
+      demoteGraceMinutes: saved.demoteGraceMinutes,
     });
   } catch (err) {
     return errorResponse(err);

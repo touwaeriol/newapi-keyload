@@ -14,7 +14,6 @@ import {
   setSiteStatus,
 } from "./naci";
 import {
-  DEMOTE_GRACE_MINUTES,
   DEMOTE_TRIGGER_SITE_IDS,
   DEMOTED_PRIORITY,
   FIXED_PRIORITY,
@@ -26,12 +25,14 @@ import {
   addLog,
   allocateCreatedChannel,
   claimPendingBatch,
+  countChannelsAtPriority,
   createdChannelIds,
   createdChannelSitesByChannel,
   deleteCreatedChannel,
   finalizeCreatedChannel,
   getConfig,
   getUploadedKeyCount,
+  listChannelsAbovePriority,
   listCreatedChannels,
   markPoolUploaded,
   poolCounts,
@@ -205,8 +206,14 @@ export async function createChannelFromNextBatch(
     throw err;
   }
 
+  // 本地检测优先级 6 配额：已建优先级 6 渠道数达到管理员上限 → 直接用优先级 5 创建，
+  // 省去「先试 6 → 服务器报错 → 再试 5」的往返（服务器报错仍作兜底，见下方 catch）。
+  const priority6Count = await countChannelsAtPriority(FIXED_PRIORITY);
+  const desiredPriority =
+    priority6Count >= cfg.priority6Limit ? DEMOTED_PRIORITY : FIXED_PRIORITY;
+
   let channelId: number;
-  let usedPriority = FIXED_PRIORITY; // 实际使用的优先级（默认 6，配额满时回退 5）
+  let usedPriority = desiredPriority; // 实际使用的优先级
   let publishSites: CreatedChannelSite[] = [];
   try {
     let created;
@@ -215,11 +222,19 @@ export async function createChannelFromNextBatch(
         name: alloc.channelName,
         keyText,
         models: cfg.models,
-        priority: FIXED_PRIORITY,
+        priority: desiredPriority,
       });
+      if (desiredPriority === DEMOTED_PRIORITY) {
+        await addLog({
+          level: "info",
+          actor: user.username,
+          channelName: alloc.channelName,
+          message: `本地已达优先级 ${FIXED_PRIORITY} 上限（${priority6Count}/${cfg.priority6Limit}），直接用优先级 ${DEMOTED_PRIORITY} 创建`,
+        });
+      }
     } catch (err) {
-      // 优先级 6 配额已满（「优先级6已达到最多6个启用渠道限制」）→ 回退用优先级 5 创建
-      if (isPriorityQuotaError(err)) {
+      // 兜底：本地计数与服务器不一致时仍可能撞「优先级6已达到最多6个启用渠道限制」→ 回退优先级 5
+      if (desiredPriority === FIXED_PRIORITY && isPriorityQuotaError(err)) {
         usedPriority = DEMOTED_PRIORITY;
         created = await createChannel({
           name: alloc.channelName,
@@ -231,7 +246,7 @@ export async function createChannelFromNextBatch(
           level: "info",
           actor: user.username,
           channelName: alloc.channelName,
-          message: `优先级 ${FIXED_PRIORITY} 配额已满，改用优先级 ${DEMOTED_PRIORITY} 创建`,
+          message: `优先级 ${FIXED_PRIORITY} 配额已满（服务器兜底），改用优先级 ${DEMOTED_PRIORITY} 创建`,
         });
       } else {
         throw err;
@@ -441,7 +456,7 @@ interface PrefixRealtime {
   totalUsedAmount: number;
 }
 
-const CHANNEL_RT_TTL_MS = 30_000;
+const CHANNEL_RT_TTL_MS = 60_000;
 
 interface RtCacheEntry {
   at: number;
@@ -607,22 +622,23 @@ async function getPrefixRealtimeCached(user: User): Promise<PrefixRealtime> {
 }
 
 /**
- * 退化降级（供定时任务调用）：把该前缀下**已过宽限期、仍在优先级 6** 的渠道，
- * 逐个用 status-batch 读站点状态；若 DEMOTE_TRIGGER_SITE_IDS（AC/61，忽略结构性未打开的 AGT）
- * 里任一站为「禁用(2)」或「自动禁用(3)」，则 setChannelPriority 降到 5（GET→改→PUT）并回写本地记录，
+ * 全局退化降级（供**单一全局定时任务**调用，不再每个前缀/每轮各自处理）：
+ * 一次性取**所有前缀**下「已过宽限期、仍高于 DEMOTED_PRIORITY(5)」的渠道，用一次 status-batch
+ * 批量读站点状态；满足退化条件的用 setChannelPriority 降到 5（GET→改→PUT）并回写本地记录，
  * 腾出稀缺的优先级 6 配额。返回本轮降级的渠道数。异常自行捕获、不外抛。
+ *
+ * 退化判定（满足其一即降级）：
+ * 1) 渠道级自动禁用：有 key 但可用为 0（naci 列表显示「自动禁用 0/N」）；
+ * 2) 站点级退化：DEMOTE_TRIGGER_SITE_IDS（AC/61，忽略结构性未打开的 AGT）任一为禁用(2)/自动禁用(3)。
  */
-export async function demoteDegradedChannels(user: User): Promise<number> {
-  const prefix = user.channelName.trim();
-  if (!prefix) return 0;
-
-  const channels = await listCreatedChannels(prefix);
-  const graceMs = DEMOTE_GRACE_MINUTES * 60_000;
+export async function demoteAllDegradedChannels(): Promise<number> {
+  const cfg = await getConfig();
+  const graceMs = cfg.demoteGraceMinutes * 60_000;
   const now = Date.now();
-  const candidates = channels.filter(
+  const all = await listChannelsAbovePriority(DEMOTED_PRIORITY);
+  const candidates = all.filter(
     (c) =>
       c.channelId != null &&
-      c.priority > DEMOTED_PRIORITY &&
       now - new Date(c.createdAt).getTime() > graceMs
   );
   if (candidates.length === 0) return 0;
@@ -636,13 +652,11 @@ export async function demoteDegradedChannels(user: User): Promise<number> {
   }
 
   let demoted = 0;
+  const affectedPrefixes = new Set<string>();
   for (const c of candidates) {
     const st = statusMap.get(c.channelId as number);
     if (!st) continue;
     const siteStatus = new Map(st.sites.map((s) => [s.site_id, s.status]));
-    // 触发条件（满足其一即降级）：
-    // 1) 渠道级自动禁用：有 key 但可用为 0（naci 列表显示「自动禁用 0/N」）；
-    // 2) 站点级退化：AC(6)/61(21) 任一为禁用(2)/自动禁用(3)（忽略结构性未打开的 AGT/13）。
     const channelExhausted =
       st.hasKeyInfo && st.multiKeySize > 0 && st.aliveCount === 0;
     const siteDegraded = DEMOTE_TRIGGER_SITE_IDS.some((sid) => {
@@ -655,10 +669,11 @@ export async function demoteDegradedChannels(user: User): Promise<number> {
       await setChannelPriority(c.channelId as number, DEMOTED_PRIORITY);
       await updateCreatedChannelPriority(c.channelId as number, DEMOTED_PRIORITY);
       demoted += 1;
+      affectedPrefixes.add(c.prefix);
       await addLog({
         level: "info",
         actor: "engine",
-        channelName: prefix,
+        channelName: c.prefix,
         channelId: c.channelId,
         message: `渠道 ${c.channelName} 站点退化，优先级 ${c.priority}→${DEMOTED_PRIORITY}（腾出优先级配额）`,
       });
@@ -666,7 +681,7 @@ export async function demoteDegradedChannels(user: User): Promise<number> {
       await addLog({
         level: "error",
         actor: "engine",
-        channelName: prefix,
+        channelName: c.prefix,
         channelId: c.channelId,
         message: `渠道 ${c.channelName} 降级失败：${
           err instanceof Error ? err.message : String(err)
@@ -675,7 +690,7 @@ export async function demoteDegradedChannels(user: User): Promise<number> {
     }
   }
 
-  if (demoted > 0) invalidateChannelCache(prefix);
+  for (const p of affectedPrefixes) invalidateChannelCache(p);
   return demoted;
 }
 
