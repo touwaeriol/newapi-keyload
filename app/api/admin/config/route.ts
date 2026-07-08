@@ -24,6 +24,10 @@ export async function GET(req: NextRequest) {
       priority6Limit: cfg.priority6Limit,
       priorityTaskIntervalMinutes: cfg.priorityTaskIntervalMinutes,
       demoteGraceMinutes: cfg.demoteGraceMinutes,
+      globalUploadLimitCount: cfg.globalUploadLimitCount,
+      globalUploadLimitWindowMinutes: cfg.globalUploadLimitWindowMinutes,
+      userUploadLimitCount: cfg.userUploadLimitCount,
+      userUploadLimitWindowMinutes: cfg.userUploadLimitWindowMinutes,
     });
   } catch (err) {
     return errorResponse(err);
@@ -48,6 +52,10 @@ export async function PUT(req: NextRequest) {
       priority6Limit?: number;
       priorityTaskIntervalMinutes?: number;
       demoteGraceMinutes?: number;
+      globalUploadLimitCount?: number;
+      globalUploadLimitWindowMinutes?: number;
+      userUploadLimitCount?: number;
+      userUploadLimitWindowMinutes?: number;
     };
     const naciBaseUrl = (body.naciBaseUrl ?? "").trim();
     if (!naciBaseUrl) return fail("naciBaseUrl 不能为空");
@@ -101,6 +109,23 @@ export async function PUT(req: NextRequest) {
       body.demoteGraceMinutes == null
         ? current.demoteGraceMinutes
         : body.demoteGraceMinutes;
+    // 上传限速 4 项：未传则保留原值；个数钳制 0~1000000（0=不限速），窗口钳制 1~1440 分钟
+    const globalUploadLimitCount =
+      body.globalUploadLimitCount == null
+        ? current.globalUploadLimitCount
+        : body.globalUploadLimitCount;
+    const globalUploadLimitWindowMinutes =
+      body.globalUploadLimitWindowMinutes == null
+        ? current.globalUploadLimitWindowMinutes
+        : body.globalUploadLimitWindowMinutes;
+    const userUploadLimitCount =
+      body.userUploadLimitCount == null
+        ? current.userUploadLimitCount
+        : body.userUploadLimitCount;
+    const userUploadLimitWindowMinutes =
+      body.userUploadLimitWindowMinutes == null
+        ? current.userUploadLimitWindowMinutes
+        : body.userUploadLimitWindowMinutes;
 
     await saveConfig({
       naciBaseUrl,
@@ -115,6 +140,10 @@ export async function PUT(req: NextRequest) {
       priority6Limit,
       priorityTaskIntervalMinutes,
       demoteGraceMinutes,
+      globalUploadLimitCount,
+      globalUploadLimitWindowMinutes,
+      userUploadLimitCount,
+      userUploadLimitWindowMinutes,
     });
     // 回读钳制后的最终值返回
     const saved = await getConfig();
@@ -131,6 +160,10 @@ export async function PUT(req: NextRequest) {
       priority6Limit: saved.priority6Limit,
       priorityTaskIntervalMinutes: saved.priorityTaskIntervalMinutes,
       demoteGraceMinutes: saved.demoteGraceMinutes,
+      globalUploadLimitCount: saved.globalUploadLimitCount,
+      globalUploadLimitWindowMinutes: saved.globalUploadLimitWindowMinutes,
+      userUploadLimitCount: saved.userUploadLimitCount,
+      userUploadLimitWindowMinutes: saved.userUploadLimitWindowMinutes,
     });
   } catch (err) {
     return errorResponse(err);

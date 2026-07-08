@@ -27,6 +27,9 @@ export async function PUT(
       role?: Role;
       channelName?: string;
       regenerateKey?: boolean;
+      /** 单用户上传限速覆盖：数字=覆盖（个数 0=不限速），显式 null=清除回全局默认，未传=不动 */
+      uploadLimitCount?: number | null;
+      uploadLimitWindowMinutes?: number | null;
     };
 
     if (typeof body.username === "string") {
@@ -62,6 +65,30 @@ export async function PUT(
       if (nextName !== target.channelName) {
         target.channelName = nextName;
         target.channelId = null;
+      }
+    }
+
+    // 单用户上传限速覆盖：区分「未传」（保持原值）与「显式 null」（清除覆盖，回全局默认）
+    if ("uploadLimitCount" in body) {
+      if (body.uploadLimitCount == null) {
+        target.uploadLimitCount = null;
+      } else {
+        const v = Math.floor(Number(body.uploadLimitCount));
+        if (!Number.isFinite(v) || v < 0) {
+          return fail("上传限速·个数需为 ≥0 的整数（0=不限速）");
+        }
+        target.uploadLimitCount = Math.min(v, 1_000_000);
+      }
+    }
+    if ("uploadLimitWindowMinutes" in body) {
+      if (body.uploadLimitWindowMinutes == null) {
+        target.uploadLimitWindowMinutes = null;
+      } else {
+        const v = Math.floor(Number(body.uploadLimitWindowMinutes));
+        if (!Number.isFinite(v) || v < 1 || v > 1440) {
+          return fail("上传限速·窗口需为 1~1440 分钟");
+        }
+        target.uploadLimitWindowMinutes = v;
       }
     }
 

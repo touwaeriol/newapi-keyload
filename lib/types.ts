@@ -19,6 +19,10 @@ export interface User {
   deadKeyCount?: number | null;
   /** 所有已建渠道的聚合已用额度缓存（naci used-quota，单位同平台 quota；÷QUOTA_PER_USD=美元） */
   usedQuota?: number | null;
+  /** 单用户上传限速·个数覆盖（窗口内最多上传 key 数，0=不限；NULL=跟随全局默认） */
+  uploadLimitCount?: number | null;
+  /** 单用户上传限速·窗口分钟覆盖（NULL=跟随全局默认） */
+  uploadLimitWindowMinutes?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -57,6 +61,14 @@ export interface SystemConfig {
    * 避免刚建、站点尚未就绪时被误判降级。0=不设宽限，建后即可被判定。
    */
   demoteGraceMinutes: number;
+  /** 全局上传限速：窗口内最多上传（推站点）多少个 key（0=不限速） */
+  globalUploadLimitCount: number;
+  /** 全局上传限速窗口（分钟，1~1440） */
+  globalUploadLimitWindowMinutes: number;
+  /** 用户默认上传限速：每个用户窗口内最多上传多少个 key（0=不限速；可被单用户覆盖） */
+  userUploadLimitCount: number;
+  /** 用户默认上传限速窗口（分钟，1~1440；可被单用户覆盖） */
+  userUploadLimitWindowMinutes: number;
 }
 
 export type LogLevel = "info" | "success" | "warn" | "error";

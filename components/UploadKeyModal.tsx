@@ -34,6 +34,9 @@ export interface DirectUploadResult {
   platformKeyCount: number | null;
   /** 恒为 null */
   deadKeyCount: number | null;
+  /** 是否因上传限速未推完（剩余 pending 等窗口滚动后由引擎续传） */
+  limited?: boolean;
+  limitedMessage?: string;
 }
 
 /** 上传弹窗内联结果：入队 or 直传，用 mode 区分展示。 */
@@ -122,9 +125,15 @@ export function UploadKeyModal({
         body: JSON.stringify({ keys }),
       });
       setResult({ mode: "direct", data: res });
-      toast.success(
-        `已建 ${res.createdChannels} 个新渠道共传 ${res.pushed} 个（新录入 ${res.added}，剩余待上传 ${res.poolPending}）`
-      );
+      if (res.limited) {
+        toast.info(
+          `已建 ${res.createdChannels} 个新渠道共传 ${res.pushed} 个后触发上传限速（剩余待上传 ${res.poolPending}，窗口滚动后自动续传）`
+        );
+      } else {
+        toast.success(
+          `已建 ${res.createdChannels} 个新渠道共传 ${res.pushed} 个（新录入 ${res.added}，剩余待上传 ${res.poolPending}）`
+        );
+      }
       onUploaded?.();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "直接上传失败");
@@ -227,7 +236,14 @@ export function UploadResultView({ result }: { result: UploadQueueResult }) {
 /** 直接上传结果视图：突出「新建渠道数 / 本次上传数」，并给出录入/剩余概况。 */
 export function DirectResultView({ result }: { result: DirectUploadResult }) {
   return (
-    <div className="grid grid-cols-3 gap-3 text-sm">
+    <div className="space-y-2">
+      {result.limited && (
+        <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+          ⚠️ {result.limitedMessage ?? "已触发上传限速"}
+          ，剩余待上传的 key 会在窗口滚动后由定时引擎自动续传。
+        </p>
+      )}
+      <div className="grid grid-cols-3 gap-3 text-sm">
       <Stat
         label="新建渠道数"
         value={<span className="text-emerald-600">{result.createdChannels}</span>}
@@ -244,6 +260,7 @@ export function DirectResultView({ result }: { result: DirectUploadResult }) {
           )
         }
       />
+      </div>
     </div>
   );
 }

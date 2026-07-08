@@ -22,6 +22,8 @@ const SEED_REFILL_INTERVAL_MINUTES = 1;
 const SEED_PRIORITY6_LIMIT = 6; // 优先级6渠道数量上限（naci 账号配额）
 const SEED_PRIORITY_TASK_INTERVAL_MINUTES = 5; // 优先级降级全局定时任务间隔（分钟）
 const SEED_DEMOTE_GRACE_MINUTES = 5; // 僵尸/退化判定宽限期（分钟）
+const SEED_UPLOAD_LIMIT_COUNT = 0; // 上传限速·个数（全局/用户默认共用 seed；0=不限速）
+const SEED_UPLOAD_LIMIT_WINDOW_MINUTES = 10; // 上传限速窗口（分钟，全局/用户默认共用 seed）
 
 /** 聚合 key 数量合法区间钳制（1~1000，每渠道聚合多少 key） */
 export function clampBatchSize(n: unknown): number {
@@ -67,6 +69,22 @@ export function clampPriorityTaskIntervalMinutes(n: unknown): number {
 export function clampDemoteGraceMinutes(n: unknown): number {
   const v = Math.floor(Number(n));
   if (!Number.isFinite(v) || v < 0) return SEED_DEMOTE_GRACE_MINUTES;
+  if (v > 1440) return 1440;
+  return v;
+}
+
+/** 上传限速·个数钳制（0~1000000；0=不限速） */
+export function clampUploadLimitCount(n: unknown): number {
+  const v = Math.floor(Number(n));
+  if (!Number.isFinite(v) || v < 0) return SEED_UPLOAD_LIMIT_COUNT;
+  if (v > 1_000_000) return 1_000_000;
+  return v;
+}
+
+/** 上传限速窗口（分钟）钳制（1~1440） */
+export function clampUploadLimitWindowMinutes(n: unknown): number {
+  const v = Math.floor(Number(n));
+  if (!Number.isFinite(v) || v < 1) return SEED_UPLOAD_LIMIT_WINDOW_MINUTES;
   if (v > 1440) return 1440;
   return v;
 }
@@ -126,6 +144,13 @@ async function createTables(pool: Pool): Promise<void> {
   await pool.query(
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS used_quota bigint`
   );
+  // 单用户上传限速覆盖（NULL=跟随全局默认；个数 0=不限速）。
+  await pool.query(
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS upload_limit_count integer`
+  );
+  await pool.query(
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS upload_limit_window_minutes integer`
+  );
   await pool.query(`
     CREATE TABLE IF NOT EXISTS config (
       id int PRIMARY KEY DEFAULT 1,
@@ -169,6 +194,19 @@ async function createTables(pool: Pool): Promise<void> {
   // 僵尸/退化判定宽限期（分钟，默认 5）。
   await pool.query(
     `ALTER TABLE config ADD COLUMN IF NOT EXISTS demote_grace_minutes int NOT NULL DEFAULT 5`
+  );
+  // 上传限速：全局 + 用户默认（个数 0=不限速；窗口分钟）。
+  await pool.query(
+    `ALTER TABLE config ADD COLUMN IF NOT EXISTS global_upload_limit_count int NOT NULL DEFAULT 0`
+  );
+  await pool.query(
+    `ALTER TABLE config ADD COLUMN IF NOT EXISTS global_upload_limit_window_minutes int NOT NULL DEFAULT 10`
+  );
+  await pool.query(
+    `ALTER TABLE config ADD COLUMN IF NOT EXISTS user_upload_limit_count int NOT NULL DEFAULT 0`
+  );
+  await pool.query(
+    `ALTER TABLE config ADD COLUMN IF NOT EXISTS user_upload_limit_window_minutes int NOT NULL DEFAULT 10`
   );
   await pool.query(`
     CREATE TABLE IF NOT EXISTS logs (
@@ -321,6 +359,8 @@ interface UserRow {
   platform_key_count: number | null;
   dead_key_count: number | null;
   used_quota: string | number | null;
+  upload_limit_count: number | null;
+  upload_limit_window_minutes: number | null;
   created_at: Date | string;
   updated_at: Date | string;
 }
@@ -341,6 +381,12 @@ function rowToUser(r: UserRow): User {
       r.platform_key_count == null ? null : Number(r.platform_key_count),
     deadKeyCount: r.dead_key_count == null ? null : Number(r.dead_key_count),
     usedQuota: r.used_quota == null ? null : Number(r.used_quota),
+    uploadLimitCount:
+      r.upload_limit_count == null ? null : Number(r.upload_limit_count),
+    uploadLimitWindowMinutes:
+      r.upload_limit_window_minutes == null
+        ? null
+        : Number(r.upload_limit_window_minutes),
     createdAt: toIso(r.created_at),
     updatedAt: toIso(r.updated_at),
   };
@@ -392,14 +438,16 @@ export async function findUserByChannelName(
 export async function upsertUser(user: User): Promise<void> {
   const pool = await ensureReady();
   await pool.query(
-    `INSERT INTO users (id, username, role, access_key, channel_name, channel_id, created_at, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+    `INSERT INTO users (id, username, role, access_key, channel_name, channel_id, upload_limit_count, upload_limit_window_minutes, created_at, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
      ON CONFLICT (id) DO UPDATE SET
        username = EXCLUDED.username,
        role = EXCLUDED.role,
        access_key = EXCLUDED.access_key,
        channel_name = EXCLUDED.channel_name,
        channel_id = EXCLUDED.channel_id,
+       upload_limit_count = EXCLUDED.upload_limit_count,
+       upload_limit_window_minutes = EXCLUDED.upload_limit_window_minutes,
        created_at = EXCLUDED.created_at,
        updated_at = EXCLUDED.updated_at`,
     [
@@ -409,6 +457,8 @@ export async function upsertUser(user: User): Promise<void> {
       user.accessKey,
       user.channelName,
       user.channelId,
+      user.uploadLimitCount ?? null,
+      user.uploadLimitWindowMinutes ?? null,
       user.createdAt,
       user.updatedAt,
     ]
@@ -460,8 +510,12 @@ export async function getConfig(): Promise<SystemConfig> {
     priority6_limit: number;
     priority_task_interval_minutes: number;
     demote_grace_minutes: number;
+    global_upload_limit_count: number;
+    global_upload_limit_window_minutes: number;
+    user_upload_limit_count: number;
+    user_upload_limit_window_minutes: number;
   }>(
-    "SELECT naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, priority_task_interval_minutes, demote_grace_minutes FROM config WHERE id = 1"
+    "SELECT naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, priority_task_interval_minutes, demote_grace_minutes, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes FROM config WHERE id = 1"
   );
   if (!rows[0]) {
     return {
@@ -477,6 +531,10 @@ export async function getConfig(): Promise<SystemConfig> {
       priority6Limit: SEED_PRIORITY6_LIMIT,
       priorityTaskIntervalMinutes: SEED_PRIORITY_TASK_INTERVAL_MINUTES,
       demoteGraceMinutes: SEED_DEMOTE_GRACE_MINUTES,
+      globalUploadLimitCount: SEED_UPLOAD_LIMIT_COUNT,
+      globalUploadLimitWindowMinutes: SEED_UPLOAD_LIMIT_WINDOW_MINUTES,
+      userUploadLimitCount: SEED_UPLOAD_LIMIT_COUNT,
+      userUploadLimitWindowMinutes: SEED_UPLOAD_LIMIT_WINDOW_MINUTES,
     };
   }
   return {
@@ -494,6 +552,16 @@ export async function getConfig(): Promise<SystemConfig> {
       rows[0].priority_task_interval_minutes
     ),
     demoteGraceMinutes: clampDemoteGraceMinutes(rows[0].demote_grace_minutes),
+    globalUploadLimitCount: clampUploadLimitCount(
+      rows[0].global_upload_limit_count
+    ),
+    globalUploadLimitWindowMinutes: clampUploadLimitWindowMinutes(
+      rows[0].global_upload_limit_window_minutes
+    ),
+    userUploadLimitCount: clampUploadLimitCount(rows[0].user_upload_limit_count),
+    userUploadLimitWindowMinutes: clampUploadLimitWindowMinutes(
+      rows[0].user_upload_limit_window_minutes
+    ),
   };
 }
 
@@ -501,8 +569,8 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
   const pool = await ensureReady();
   const models = (cfg.models ?? "").trim() || SEED_MODELS;
   await pool.query(
-    `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, priority_task_interval_minutes, demote_grace_minutes)
-     VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, priority_task_interval_minutes, demote_grace_minutes, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes)
+     VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
      ON CONFLICT (id) DO UPDATE SET
        naci_base_url = EXCLUDED.naci_base_url,
        naci_token = EXCLUDED.naci_token,
@@ -515,7 +583,11 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
        refill_interval_minutes = EXCLUDED.refill_interval_minutes,
        priority6_limit = EXCLUDED.priority6_limit,
        priority_task_interval_minutes = EXCLUDED.priority_task_interval_minutes,
-       demote_grace_minutes = EXCLUDED.demote_grace_minutes`,
+       demote_grace_minutes = EXCLUDED.demote_grace_minutes,
+       global_upload_limit_count = EXCLUDED.global_upload_limit_count,
+       global_upload_limit_window_minutes = EXCLUDED.global_upload_limit_window_minutes,
+       user_upload_limit_count = EXCLUDED.user_upload_limit_count,
+       user_upload_limit_window_minutes = EXCLUDED.user_upload_limit_window_minutes`,
     [
       cfg.naciBaseUrl,
       cfg.naciToken ?? "",
@@ -529,6 +601,10 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
       clampPriority6Limit(cfg.priority6Limit),
       clampPriorityTaskIntervalMinutes(cfg.priorityTaskIntervalMinutes),
       clampDemoteGraceMinutes(cfg.demoteGraceMinutes),
+      clampUploadLimitCount(cfg.globalUploadLimitCount),
+      clampUploadLimitWindowMinutes(cfg.globalUploadLimitWindowMinutes),
+      clampUploadLimitCount(cfg.userUploadLimitCount),
+      clampUploadLimitWindowMinutes(cfg.userUploadLimitWindowMinutes),
     ]
   );
 }

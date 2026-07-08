@@ -17,6 +17,17 @@ services:
       timeout: 5s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    container_name: newapi-keyload-redis
+    restart: unless-stopped
+    # 仅供上传限速滚动桶使用，数据为分钟级窗口计数，无需持久卷、不暴露宿主端口
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   keyload:
     build: .
     image: newapi-keyload:latest
@@ -24,6 +35,8 @@ services:
     restart: unless-stopped
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     ports:
       # 宿主 3010 → 容器 3000
@@ -33,6 +46,8 @@ services:
       - TZ=Asia/Shanghai
       # 连接同一 compose 网络内的 db 服务（无需 .env）
       - DATABASE_URL=postgres://keyload:keyload_pw_2f9x@db:5432/keyload
+      # 上传限速滚动桶；连不上会自动降级为进程内存桶（见 lib/rateLimit.ts）
+      - REDIS_URL=redis://redis:6379
     healthcheck:
       # 必须用 127.0.0.1 而非 localhost：busybox wget 把 localhost 解析成 ::1(IPv6)，
       # 而 Next 服务只监听 IPv4 → 健康检查恒失败。见 memory: healthcheck-ipv4-localhost。

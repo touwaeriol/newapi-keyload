@@ -33,6 +33,9 @@ export function UserEditorModal({
   const [role, setRole] = useState<Role>("user");
   const [channelName, setChannelName] = useState("");
   const [regenerateKey, setRegenerateKey] = useState(false);
+  // 单用户上传限速覆盖（字符串态，空串=跟随全局默认→提交 null）
+  const [limitCount, setLimitCount] = useState("");
+  const [limitWindow, setLimitWindow] = useState("");
   const [loading, setLoading] = useState(false);
 
   // 保存成功后要展示的完整密钥（新建 / 重置密钥）
@@ -48,6 +51,14 @@ export function UserEditorModal({
     setUsername(target?.username ?? "");
     setRole(target?.role ?? "user");
     setChannelName(target?.channelName ?? "");
+    setLimitCount(
+      target?.uploadLimitCount == null ? "" : String(target.uploadLimitCount)
+    );
+    setLimitWindow(
+      target?.uploadLimitWindowMinutes == null
+        ? ""
+        : String(target.uploadLimitWindowMinutes)
+    );
     setRegenerateKey(false);
     setRevealed(null);
   }, [open, target]);
@@ -67,6 +78,25 @@ export function UserEditorModal({
       toast.error("请输入渠道前缀");
       return;
     }
+    // 单用户限速覆盖：空串=null（跟随全局默认），否则必须是合法数字
+    let uploadLimitCount: number | null = null;
+    if (limitCount.trim() !== "") {
+      const v = Math.floor(Number(limitCount));
+      if (!Number.isFinite(v) || v < 0) {
+        toast.error("上传限速·个数需为 ≥0 的整数（0=不限速）");
+        return;
+      }
+      uploadLimitCount = v;
+    }
+    let uploadLimitWindowMinutes: number | null = null;
+    if (limitWindow.trim() !== "") {
+      const v = Math.floor(Number(limitWindow));
+      if (!Number.isFinite(v) || v < 1 || v > 1440) {
+        toast.error("上传限速·窗口需为 1~1440 分钟");
+        return;
+      }
+      uploadLimitWindowMinutes = v;
+    }
     setLoading(true);
     try {
       if (isEdit && target) {
@@ -79,6 +109,8 @@ export function UserEditorModal({
               role,
               channelName: channelName.trim(),
               regenerateKey,
+              uploadLimitCount,
+              uploadLimitWindowMinutes,
             }),
           }
         );
@@ -210,6 +242,37 @@ export function UserEditorModal({
             autoComplete="off"
           />
         </Field>
+
+        {isEdit && (
+          <div className="grid grid-cols-2 gap-3">
+            <Field
+              label="上传限速·个数"
+              hint="窗口内最多上传 key 数；0=不限速；留空=跟随全局默认"
+            >
+              <TextInput
+                type="number"
+                min={0}
+                max={1000000}
+                value={limitCount}
+                onChange={(e) => setLimitCount(e.target.value)}
+                placeholder="留空=全局默认"
+              />
+            </Field>
+            <Field
+              label="上传限速·窗口（分钟）"
+              hint="滚动窗口长度 1~1440；留空=跟随全局默认"
+            >
+              <TextInput
+                type="number"
+                min={1}
+                max={1440}
+                value={limitWindow}
+                onChange={(e) => setLimitWindow(e.target.value)}
+                placeholder="留空=全局默认"
+              />
+            </Field>
+          </div>
+        )}
 
         {isEdit && (
           <label className="flex cursor-pointer items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600">

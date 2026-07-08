@@ -32,6 +32,9 @@ interface CreateBatchResult {
   channelName?: string;
   channelId?: number;
   keyCount?: number;
+  /** 是否因上传限速被拦下 */
+  limited?: boolean;
+  limitedMessage?: string;
   poolPending: number;
   poolUploaded: number;
 }
@@ -160,6 +163,8 @@ function ChannelCard({
         toast.success(
           `已新建渠道 ${res.channelName}（本批 ${res.keyCount} 个，剩余待上传 ${res.poolPending}）`
         );
+      } else if (res.limited) {
+        toast.error(res.limitedMessage ?? "上传限速中，请稍后再试");
       } else {
         toast.info("本地库暂无待上传 key");
       }
@@ -261,9 +266,15 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
       });
       setResult({ mode: "direct", data: res });
       setText("");
-      toast.success(
-        `已建 ${res.createdChannels} 个新渠道共传 ${res.pushed} 个（新录入 ${res.added}，剩余待上传 ${res.poolPending}）`
-      );
+      if (res.limited) {
+        toast.info(
+          `已建 ${res.createdChannels} 个新渠道共传 ${res.pushed} 个后触发上传限速（剩余待上传 ${res.poolPending}，窗口滚动后自动续传）`
+        );
+      } else {
+        toast.success(
+          `已建 ${res.createdChannels} 个新渠道共传 ${res.pushed} 个（新录入 ${res.added}，剩余待上传 ${res.poolPending}）`
+        );
+      }
       onUploaded();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "直接上传失败");

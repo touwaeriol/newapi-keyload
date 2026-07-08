@@ -45,6 +45,13 @@ import {
   upsertUser,
   type CreatedChannelSite,
 } from "./store";
+import {
+  consumeBucket,
+  effectiveUserLimit,
+  GLOBAL_SCOPE,
+  peekBucket,
+  userScope,
+} from "./rateLimit";
 import type { User } from "./types";
 
 /** 单次「逐批建渠道」的渠道数硬上限（安全阀，防极端 paste 打爆 naci）。实际处理量由 maxKeys 控制。 */
@@ -156,6 +163,10 @@ export interface CreateBatchResult {
   keyCount?: number;
   /** 本系统累计去重上传数（该前缀）。 */
   uploadedKeyCount?: number;
+  /** 是否因上传限速被拦下（此时 created:false 且池里仍有 pending）。 */
+  limited?: boolean;
+  /** 限速说明（供前端 toast / 日志展示）。 */
+  limitedMessage?: string;
   poolPending: number;
   poolUploaded: number;
   platformKeyCount: number | null;
@@ -179,8 +190,54 @@ export async function createChannelFromNextBatch(
   if (!prefix) throw new Error("当前用户未配置渠道前缀，无法上传 key");
 
   const cfg = await getConfig();
+
+  // —— 上传限速（滚动窗口）：全局桶与用户桶取剩余额度较小者。 ——
+  // 额度耗尽 → 本批不建（引擎下轮/窗口滚动后自动续传）；额度不足一整批 → 允许小批上传（避免限额<聚合数时死锁）。
+  const gUsage = await peekBucket(
+    GLOBAL_SCOPE,
+    cfg.globalUploadLimitCount,
+    cfg.globalUploadLimitWindowMinutes
+  );
+  const eff = effectiveUserLimit(user, cfg);
+  const uUsage = await peekBucket(userScope(user.id), eff.limit, eff.windowMinutes);
+  const gRemain = gUsage.unlimited
+    ? Infinity
+    : Math.max(0, gUsage.limit - gUsage.used);
+  const uRemain = uUsage.unlimited
+    ? Infinity
+    : Math.max(0, uUsage.limit - uUsage.used);
+  const allowance = Math.min(gRemain, uRemain);
+  if (allowance <= 0) {
+    const blocker =
+      gRemain <= uRemain
+        ? `全局已用 ${gUsage.used}/${gUsage.limit}（${gUsage.windowMinutes} 分钟窗口）`
+        : `用户已用 ${uUsage.used}/${uUsage.limit}（${uUsage.windowMinutes} 分钟窗口）`;
+    const limitedMessage = `上传限速中：${blocker}，等待窗口滚动后自动续传`;
+    const { pending, uploaded } = await poolCounts(prefix);
+    if (pending > 0) {
+      await addLog({
+        level: "info",
+        actor: user.username,
+        channelName: prefix,
+        message: `${limitedMessage}（待上传 ${pending}）`,
+      });
+    }
+    return {
+      created: false,
+      limited: true,
+      limitedMessage,
+      poolPending: pending,
+      poolUploaded: uploaded,
+      platformKeyCount: null,
+      deadKeyCount: null,
+    };
+  }
+
   // 原子认领：并发（双击 / 双标签页 / kick 撞手动 / admin+user）各自拿到不相交批次
-  const batch = await claimPendingBatch(prefix, cfg.uploadBatchSize);
+  const batch = await claimPendingBatch(
+    prefix,
+    Math.min(cfg.uploadBatchSize, allowance)
+  );
   if (batch.length === 0) {
     const { pending, uploaded } = await poolCounts(prefix);
     return {
@@ -272,6 +329,14 @@ export async function createChannelFromNextBatch(
   // naci 已成功：先把 key 标记已上传（claimed→uploaded），确保后续任一步失败也不会重传本批。
   await markPoolUploaded(batchIds);
 
+  // 限速记账：上传成功才计数（失败不扣额度）。全局桶即使不限速也照常统计，供状态页展示速率。
+  await consumeBucket(
+    GLOBAL_SCOPE,
+    cleanKeys.length,
+    cfg.globalUploadLimitWindowMinutes
+  );
+  await consumeBucket(userScope(user.id), cleanKeys.length, eff.windowMinutes);
+
   // best-effort 回填渠道信息 + 各站远程 id：失败只记 error 不抛（渠道已建成、key 已锁定）。
   try {
     await finalizeCreatedChannel(alloc.id, {
@@ -340,6 +405,9 @@ export async function createChannelsDrain(
   pushed: number;
   poolPending: number;
   poolUploaded: number;
+  /** 是否因上传限速提前停止（池里还有 pending，等窗口滚动） */
+  limited: boolean;
+  limitedMessage?: string;
 }> {
   let createdChannels = 0;
   let pushed = 0;
@@ -348,7 +416,7 @@ export async function createChannelsDrain(
     if (pushed >= maxKeys) break; // 本次已处理够「每批处理数量」个 key
     const r = await createChannelFromNextBatch(user);
     last = r;
-    if (!r.created) break;
+    if (!r.created) break; // 池空或被限速（r.limited）都停止本轮
     createdChannels += 1;
     pushed += r.keyCount ?? 0;
   }
@@ -358,10 +426,18 @@ export async function createChannelsDrain(
       pushed,
       poolPending: last.poolPending,
       poolUploaded: last.poolUploaded,
+      limited: Boolean(last.limited),
+      limitedMessage: last.limitedMessage,
     };
   }
   const { pending, uploaded } = await poolCounts(user.channelName.trim());
-  return { createdChannels, pushed, poolPending: pending, poolUploaded: uploaded };
+  return {
+    createdChannels,
+    pushed,
+    poolPending: pending,
+    poolUploaded: uploaded,
+    limited: false,
+  };
 }
 
 /** 直接上传结果（跳过定时轮，本次提交立即建渠道）。 */
@@ -379,6 +455,9 @@ export interface DirectUploadResult {
   /** 多渠道聚合无单一值，保留字段但恒为 null（前端不再依赖） */
   platformKeyCount: number | null;
   deadKeyCount: number | null;
+  /** 是否因上传限速未推完（剩余 pending 等窗口滚动后由引擎续传） */
+  limited?: boolean;
+  limitedMessage?: string;
 }
 
 /**
@@ -407,7 +486,9 @@ export async function directUploadKeys(
     level: "info",
     actor: user.username,
     channelName: prefix,
-    message: `直接上传：新录入 ${added} 个，建 ${drain.createdChannels} 个新渠道共传 ${drain.pushed} 个 key（剩余待上传 ${drain.poolPending}）`,
+    message: `直接上传：新录入 ${added} 个，建 ${drain.createdChannels} 个新渠道共传 ${drain.pushed} 个 key（剩余待上传 ${drain.poolPending}）${
+      drain.limited ? "，已触发上传限速，剩余等窗口滚动自动续传" : ""
+    }`,
   });
 
   return {
@@ -418,6 +499,8 @@ export async function directUploadKeys(
     poolUploaded: drain.poolUploaded,
     platformKeyCount: null,
     deadKeyCount: null,
+    limited: drain.limited,
+    limitedMessage: drain.limitedMessage,
   };
 }
 
@@ -724,6 +807,17 @@ export async function resolveMyChannel(user: User) {
   const prefix = user.channelName.trim();
   const { nextCheckAt, checking, lastCheck } = engineViewState(prefix);
 
+  // 该用户生效的上传限速状态（个人覆盖 ?? 全局默认；随轮询定时刷新）
+  const eff = effectiveUserLimit(user, cfg);
+  const uUsage = await peekBucket(userScope(user.id), eff.limit, eff.windowMinutes);
+  const uploadLimit = {
+    used: uUsage.used,
+    limit: uUsage.limit,
+    windowMinutes: uUsage.windowMinutes,
+    unlimited: uUsage.unlimited,
+    isOverride: eff.isOverride,
+  };
+
   if (!prefix) {
     return {
       exists: false as const,
@@ -736,6 +830,7 @@ export async function resolveMyChannel(user: User) {
       poolUploaded: 0,
       uploadBatchSize,
       autoRefillEnabled,
+      uploadLimit,
       nextCheckAt,
       checking,
       lastCheck,
@@ -760,6 +855,7 @@ export async function resolveMyChannel(user: User) {
     poolUploaded,
     uploadBatchSize,
     autoRefillEnabled,
+    uploadLimit,
     nextCheckAt,
     checking,
     lastCheck,

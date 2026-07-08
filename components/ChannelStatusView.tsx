@@ -68,6 +68,15 @@ export interface ChannelStatus {
   uploadBatchSize?: number;
   /** 是否启用自动补 key */
   autoRefillEnabled?: boolean;
+  /** 该用户生效的上传限速状态（滚动窗口用量，随轮询刷新） */
+  uploadLimit?: {
+    used: number;
+    limit: number;
+    windowMinutes: number;
+    unlimited: boolean;
+    /** 是否为单用户自定义限速（而非全局默认） */
+    isOverride: boolean;
+  } | null;
   /** 下一次定时检查时间（ISO 字符串） */
   nextCheckAt?: string | null;
   /** 定时引擎当前是否正在检查 */
@@ -403,12 +412,23 @@ function UploadProgress({ channel }: { channel: ChannelStatus }) {
   const auto = channel.autoRefillEnabled;
   const alive = aliveKeyCount(channel);
   const exhausted = isExhausted(channel);
+  const limit = channel.uploadLimit;
+  const limitedNow = limit != null && !limit.unlimited && limit.used >= limit.limit;
 
   return (
     <div className="rounded-xl border border-brand-100 bg-brand-50/50 p-4">
       <div className="mb-3 flex items-center justify-between gap-2">
         <h4 className="text-sm font-semibold text-slate-800">上传进度</h4>
         <div className="flex flex-wrap items-center justify-end gap-2">
+          {limit != null &&
+            (limit.unlimited ? (
+              <Badge tone="slate">上传不限速</Badge>
+            ) : (
+              <Badge tone={limitedNow ? "rose" : "green"}>
+                {limitedNow ? "限速中" : "上传限速"} {limit.used}/{limit.limit} ·{" "}
+                {limit.windowMinutes}分钟
+              </Badge>
+            ))}
           {exhausted && <Badge tone="rose">自动禁用 · 无可用 Key</Badge>}
           {auto === false ? (
             <Badge tone="rose">自动建渠道已关闭</Badge>
@@ -569,6 +589,7 @@ function statusDot(status: string): string {
     case "created":
       return "bg-emerald-500";
     case "paused":
+    case "limited":
       return "bg-amber-500";
     case "empty":
       return "bg-slate-400";

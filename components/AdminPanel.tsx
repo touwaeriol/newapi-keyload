@@ -36,6 +36,7 @@ export function AdminPanel() {
   return (
     <div className="space-y-4">
       <ConfigCard />
+      <UploadLimitCard />
       <UsersCard />
       <LogsCard />
     </div>
@@ -65,6 +66,14 @@ interface ConfigResponse {
   priorityTaskIntervalMinutes: number;
   /** 僵尸/退化判定宽限期（分钟，0~1440） */
   demoteGraceMinutes: number;
+  /** 全局上传限速·个数（窗口内最多上传 key 数，0=不限速） */
+  globalUploadLimitCount: number;
+  /** 全局上传限速窗口（分钟，1~1440） */
+  globalUploadLimitWindowMinutes: number;
+  /** 用户默认上传限速·个数（0=不限速；可被单用户覆盖） */
+  userUploadLimitCount: number;
+  /** 用户默认上传限速窗口（分钟，1~1440） */
+  userUploadLimitWindowMinutes: number;
 }
 
 const DEFAULT_BATCH_SIZE = 20;
@@ -73,6 +82,8 @@ const DEFAULT_INTERVAL_MINUTES = 1;
 const DEFAULT_PRIORITY6_LIMIT = 6;
 const DEFAULT_PRIORITY_TASK_INTERVAL = 5;
 const DEFAULT_DEMOTE_GRACE = 5;
+const DEFAULT_UPLOAD_LIMIT_COUNT = 0; // 0=不限速
+const DEFAULT_UPLOAD_LIMIT_WINDOW = 10;
 const DEFAULT_MODELS = "claude-opus-4-6,claude-opus-4-7,claude-opus-4-8";
 
 function ConfigCard() {
@@ -94,6 +105,18 @@ function ConfigCard() {
     DEFAULT_PRIORITY_TASK_INTERVAL
   );
   const [demoteGrace, setDemoteGrace] = useState<number>(DEFAULT_DEMOTE_GRACE);
+  const [gLimitCount, setGLimitCount] = useState<number>(
+    DEFAULT_UPLOAD_LIMIT_COUNT
+  );
+  const [gLimitWindow, setGLimitWindow] = useState<number>(
+    DEFAULT_UPLOAD_LIMIT_WINDOW
+  );
+  const [uLimitCount, setULimitCount] = useState<number>(
+    DEFAULT_UPLOAD_LIMIT_COUNT
+  );
+  const [uLimitWindow, setULimitWindow] = useState<number>(
+    DEFAULT_UPLOAD_LIMIT_WINDOW
+  );
   const [autoRefill, setAutoRefill] = useState(true);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -154,6 +177,30 @@ function ConfigCard() {
           ? data.demoteGraceMinutes
           : DEFAULT_DEMOTE_GRACE
       );
+      setGLimitCount(
+        typeof data.globalUploadLimitCount === "number" &&
+          data.globalUploadLimitCount >= 0
+          ? data.globalUploadLimitCount
+          : DEFAULT_UPLOAD_LIMIT_COUNT
+      );
+      setGLimitWindow(
+        typeof data.globalUploadLimitWindowMinutes === "number" &&
+          data.globalUploadLimitWindowMinutes > 0
+          ? data.globalUploadLimitWindowMinutes
+          : DEFAULT_UPLOAD_LIMIT_WINDOW
+      );
+      setULimitCount(
+        typeof data.userUploadLimitCount === "number" &&
+          data.userUploadLimitCount >= 0
+          ? data.userUploadLimitCount
+          : DEFAULT_UPLOAD_LIMIT_COUNT
+      );
+      setULimitWindow(
+        typeof data.userUploadLimitWindowMinutes === "number" &&
+          data.userUploadLimitWindowMinutes > 0
+          ? data.userUploadLimitWindowMinutes
+          : DEFAULT_UPLOAD_LIMIT_WINDOW
+      );
       setAutoRefill(Boolean(data.autoRefillEnabled));
       setPassword("");
     } catch (err) {
@@ -207,6 +254,23 @@ function ConfigCard() {
     const safeGrace = Number.isNaN(graceRaw)
       ? DEFAULT_DEMOTE_GRACE
       : Math.min(1440, Math.max(0, Math.round(graceRaw)));
+    // 上传限速·个数允许 0=不限速（不能用 || 兜底）；窗口夹到 1~1440 分钟
+    const gCountRaw = Number(gLimitCount);
+    const safeGCount = Number.isNaN(gCountRaw)
+      ? DEFAULT_UPLOAD_LIMIT_COUNT
+      : Math.min(1_000_000, Math.max(0, Math.round(gCountRaw)));
+    const safeGWindow = Math.min(
+      1440,
+      Math.max(1, Math.round(Number(gLimitWindow) || DEFAULT_UPLOAD_LIMIT_WINDOW))
+    );
+    const uCountRaw = Number(uLimitCount);
+    const safeUCount = Number.isNaN(uCountRaw)
+      ? DEFAULT_UPLOAD_LIMIT_COUNT
+      : Math.min(1_000_000, Math.max(0, Math.round(uCountRaw)));
+    const safeUWindow = Math.min(
+      1440,
+      Math.max(1, Math.round(Number(uLimitWindow) || DEFAULT_UPLOAD_LIMIT_WINDOW))
+    );
     setSaving(true);
     try {
       // naciPassword 留空 = 保持原密码不变（后端约定）
@@ -224,6 +288,10 @@ function ConfigCard() {
           priority6Limit: safeP6,
           priorityTaskIntervalMinutes: safePriInterval,
           demoteGraceMinutes: safeGrace,
+          globalUploadLimitCount: safeGCount,
+          globalUploadLimitWindowMinutes: safeGWindow,
+          userUploadLimitCount: safeUCount,
+          userUploadLimitWindowMinutes: safeUWindow,
         }),
       });
       toast.success("配置已保存");
@@ -407,6 +475,58 @@ function ConfigCard() {
               />
             </Field>
             <Field
+              label="全局上传限速·个数"
+              hint="滚动窗口内全站最多上传多少个 key；0=不限速"
+            >
+              <TextInput
+                type="number"
+                min={0}
+                max={1000000}
+                value={Number.isNaN(gLimitCount) ? "" : gLimitCount}
+                onChange={(e) => setGLimitCount(e.target.valueAsNumber)}
+                placeholder={String(DEFAULT_UPLOAD_LIMIT_COUNT)}
+              />
+            </Field>
+            <Field
+              label="全局限速窗口（分钟）"
+              hint="全局限速的滚动窗口长度，1~1440；格式即「N 分钟最多 X 个」"
+            >
+              <TextInput
+                type="number"
+                min={1}
+                max={1440}
+                value={Number.isNaN(gLimitWindow) ? "" : gLimitWindow}
+                onChange={(e) => setGLimitWindow(e.target.valueAsNumber)}
+                placeholder={String(DEFAULT_UPLOAD_LIMIT_WINDOW)}
+              />
+            </Field>
+            <Field
+              label="用户默认限速·个数"
+              hint="每个用户窗口内最多上传多少个 key；0=不限速；可在编辑用户时单独覆盖"
+            >
+              <TextInput
+                type="number"
+                min={0}
+                max={1000000}
+                value={Number.isNaN(uLimitCount) ? "" : uLimitCount}
+                onChange={(e) => setULimitCount(e.target.valueAsNumber)}
+                placeholder={String(DEFAULT_UPLOAD_LIMIT_COUNT)}
+              />
+            </Field>
+            <Field
+              label="用户默认限速窗口（分钟）"
+              hint="用户默认限速的滚动窗口长度，1~1440；可在编辑用户时单独覆盖"
+            >
+              <TextInput
+                type="number"
+                min={1}
+                max={1440}
+                value={Number.isNaN(uLimitWindow) ? "" : uLimitWindow}
+                onChange={(e) => setULimitWindow(e.target.valueAsNumber)}
+                placeholder={String(DEFAULT_UPLOAD_LIMIT_WINDOW)}
+              />
+            </Field>
+            <Field
               label="自动建渠道"
               hint="关闭后定时引擎不再自动建渠道；手动「上传一批 / 直接上传」按钮仍可用"
             >
@@ -426,6 +546,129 @@ function ConfigCard() {
             <p className="rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
               已登录 naci：<b>{pingUser}</b>
             </p>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/* ============ 上传限速状态卡 ============ */
+
+/** GET /api/admin/upload-limit 返回 shape */
+interface UploadLimitUsage {
+  used: number;
+  limit: number;
+  windowMinutes: number;
+  unlimited: boolean;
+}
+
+interface UploadLimitUserRow extends UploadLimitUsage {
+  id: string;
+  username: string;
+  channelName: string;
+  /** 是否为单用户自定义限速（而非全局默认） */
+  isOverride: boolean;
+}
+
+interface UploadLimitResponse {
+  global: UploadLimitUsage;
+  users: UploadLimitUserRow[];
+}
+
+const UPLOAD_LIMIT_POLL_INTERVAL = 15000;
+
+/** 用量文案：「已用 X / Y · Z分钟窗口」，不限速时「已用 X · 不限速」 */
+function usageText(u: UploadLimitUsage): string {
+  return u.unlimited
+    ? `已用 ${u.used} · 不限速`
+    : `已用 ${u.used} / ${u.limit} · ${u.windowMinutes}分钟窗口`;
+}
+
+/** 用量对应徽章色：不限速灰、被限中红、接近上限（≥80%）黄、正常绿 */
+function usageTone(u: UploadLimitUsage): "slate" | "green" | "amber" | "rose" {
+  if (u.unlimited) return "slate";
+  if (u.used >= u.limit) return "rose";
+  if (u.used >= u.limit * 0.8) return "amber";
+  return "green";
+}
+
+function UploadLimitCard() {
+  const [data, setData] = useState<UploadLimitResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const mounted = useRef(true);
+
+  const load = useCallback(async () => {
+    try {
+      const d = await apiFetch<UploadLimitResponse>("/api/admin/upload-limit");
+      if (mounted.current) setData(d);
+    } catch {
+      // 轮询失败静默（保留上次数据），避免 toast 刷屏
+    } finally {
+      if (mounted.current) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    mounted.current = true;
+    load();
+    const t = setInterval(load, UPLOAD_LIMIT_POLL_INTERVAL);
+    return () => {
+      mounted.current = false;
+      clearInterval(t);
+    };
+  }, [load]);
+
+  return (
+    <Card
+      title="上传限速状态"
+      subtitle="滚动窗口实时用量（15 秒自动刷新）；限速值在上方系统配置中调整"
+    >
+      {loading && !data ? (
+        <LoadingRow />
+      ) : !data ? (
+        <EmptyRow text="读取限速状态失败" />
+      ) : (
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm">
+            <span className="font-medium text-slate-700">全局</span>
+            <Badge tone={usageTone(data.global)}>{usageText(data.global)}</Badge>
+          </div>
+          {data.users.length === 0 ? (
+            <EmptyRow text="暂无用户" />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[560px] text-left text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200 text-xs text-slate-400">
+                    <th className="py-2 pr-3 font-medium">用户名</th>
+                    <th className="py-2 pr-3 font-medium">渠道前缀</th>
+                    <th className="py-2 pr-3 font-medium">窗口用量</th>
+                    <th className="py-2 pr-3 font-medium">限速来源</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.users.map((u) => (
+                    <tr key={u.id} className="border-b border-slate-100">
+                      <td className="py-2 pr-3 text-slate-700">{u.username}</td>
+                      <td className="py-2 pr-3 font-mono text-xs text-slate-500">
+                        {u.channelName || "—"}
+                      </td>
+                      <td className="py-2 pr-3">
+                        <Badge tone={usageTone(u)}>{usageText(u)}</Badge>
+                      </td>
+                      <td className="py-2 pr-3">
+                        {u.isOverride ? (
+                          <Badge tone="blue">自定义</Badge>
+                        ) : (
+                          <Badge tone="slate">全局默认</Badge>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       )}

@@ -34,7 +34,7 @@ const CLAIM_STALE_MINUTES = 10;
 /** 单前缀最近一次检查结果（供前端展示「上次检查做了什么/结果如何」）。 */
 export interface LastCheckResult {
   at: number; // 检查完成时间戳(ms)
-  status: "created" | "empty" | "paused" | "error";
+  status: "created" | "empty" | "paused" | "limited" | "error";
   message: string; // 人类可读的结果/执行说明
 }
 
@@ -145,7 +145,15 @@ async function processPrefix(
     if (pending > 0 && autoRefill) {
       // 本轮最多处理 processBatchSize 个 key（拆成 ⌈processBatchSize/聚合数⌉ 个渠道）
       const drain = await createChannelsDrain(user, processBatchSize);
-      if (drain.createdChannels > 0) {
+      if (drain.limited) {
+        recordResult(
+          prefix,
+          "limited",
+          drain.createdChannels > 0
+            ? `自动新建 ${drain.createdChannels} 个渠道后触发上传限速（剩余待上传 ${drain.poolPending}，等窗口滚动续传）`
+            : drain.limitedMessage ?? "上传限速中，等窗口滚动后续传"
+        );
+      } else if (drain.createdChannels > 0) {
         recordResult(
           prefix,
           "created",
