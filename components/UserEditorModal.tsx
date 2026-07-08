@@ -64,7 +64,7 @@ export function UserEditorModal({
       return;
     }
     if (!channelName.trim()) {
-      toast.error("请输入绑定渠道名");
+      toast.error("请输入渠道前缀");
       return;
     }
     setLoading(true);
@@ -200,13 +200,13 @@ export function UserEditorModal({
         </Field>
 
         <Field
-          label="绑定渠道名"
-          hint="naci 平台上唯一标识渠道；首次上传 key 时按此名解析/创建。访问密钥将在保存后自动生成并展示。"
+          label="渠道前缀"
+          hint="每次上传新建渠道，渠道名 = 前缀 + 4 位序号（如 前缀-0001）。访问密钥将在保存后自动生成并展示。"
         >
           <TextInput
             value={channelName}
             onChange={(e) => setChannelName(e.target.value)}
-            placeholder="如 TEST-TEAM-01"
+            placeholder="如 0708-ANTH-LIU-HAN"
             autoComplete="off"
           />
         </Field>

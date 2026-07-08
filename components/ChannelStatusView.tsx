@@ -1,11 +1,10 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
-import type { SiteAmount } from "@/lib/types";
-import { Badge } from "@/components/ui";
+import { Badge, Spinner } from "@/components/ui";
 
 /**
- * 站点调度状态（GET /api/my/channel 的 channel.sites 元素）。
+ * 站点调度状态（每个已建渠道的 sites 元素）。
  * status：1=开启 / 3=自动禁用 / 0=关闭 / 2=手动禁用 / null 或其他=未知。
  */
 export interface SiteScheduleStatus {
@@ -14,23 +13,51 @@ export interface SiteScheduleStatus {
   status: number | null;
 }
 
+/** 单个已建渠道视图（GET /api/my/channel 的 channel.channels 元素）。 */
+export interface CreatedChannelView {
+  id: string;
+  channelId: number;
+  channelName: string;
+  suffix: number;
+  keyCount: number;
+  /** 派生状态：3=自动禁用（有 key 但可用为 0），1=正常，null=无 key 信息 */
+  status: number | null;
+  platformKeyCount: number | null;
+  deadKeyCount: number | null;
+  aliveKeyCount: number | null;
+  usedQuota: number;
+  usedAmount: number;
+  sites: SiteScheduleStatus[];
+  /** 各站远程渠道 id（本地落库的 publish_results）。 */
+  remoteSites?: {
+    siteId: number;
+    remoteChannelId: number;
+    remoteChannelName: string;
+  }[];
+}
+
 /**
- * 渠道状态对象 shape（GET /api/my/channel 与 GET /api/admin/users/[id]/channel
- * 的 data.channel 一致）。顶层 camelCase；siteAmounts 内部元素仍是 snake_case。
+ * 渠道状态对象 shape（新模型：一个前缀对应多个已建渠道）。
+ * GET /api/my/channel 与 GET /api/admin/users/[id]/channel 的 data.channel 一致。
+ * platformKeyCount / deadKeyCount / usedAmount 等为**所有已建渠道的聚合值**。
  */
 export interface ChannelStatus {
   exists: boolean;
-  channelName: string;
-  channelId?: number | null;
-  /** 1 启用 / 2 手动禁用 / 3 自动禁用 */
-  status?: number;
-  type?: number;
-  /** 本系统累计上传去重 key 数 */
+  /** 用户配置的渠道前缀 */
+  prefix?: string;
+  channelName?: string;
+  /** 已成功创建的渠道数 */
+  createdCount?: number;
+  /** 已建渠道列表 */
+  channels?: CreatedChannelView[];
+  /** 本系统累计上传去重 key 数（该前缀） */
   uploadedKeyCount?: number;
-  /** 平台上该渠道的真实 key 数（multi_key_size） */
+  /** 聚合：平台真实 key 数 */
   platformKeyCount?: number | null;
-  /** 被禁用（status=3）的 key 数 */
+  /** 聚合：被禁用 key 数 */
   deadKeyCount?: number | null;
+  /** 聚合：可用 key 数 */
+  aliveKeyCount?: number | null;
   /** 本地队列中待上传的 key 数 */
   poolPending?: number;
   /** 本地队列中已上传的 key 数 */
@@ -43,32 +70,46 @@ export interface ChannelStatus {
   nextCheckAt?: string | null;
   /** 定时引擎当前是否正在检查 */
   checking?: boolean;
-  /** 该渠道最近一次检查的结果/执行说明 */
+  /** 该前缀最近一次检查的结果/执行说明 */
   lastCheck?: {
     at: string;
     status: string;
     message: string;
   } | null;
-  models?: string;
-  priority?: number;
-  group?: string;
+  /** naci 实时数据快照生成时间（ISO）；用于「缓存刷新倒计时」 */
+  cachedAt?: string | null;
+  /** naci 实时数据缓存时长（毫秒） */
+  cacheTtlMs?: number;
+  /** 聚合总用量金额 */
   usedQuota?: number;
   usedAmount?: number;
-  siteAmounts?: SiteAmount[];
-  /** 各站点调度状态（用户端可手动开/关） */
-  sites?: SiteScheduleStatus[];
 }
 
-function statusBadge(status?: number) {
+/** 站点状态徽章：1 开启 / 3 自动禁用 / 2 手动禁用 / 0 已关闭 / 其它未知 */
+function siteBadge(status: number | null) {
   switch (status) {
     case 1:
-      return <Badge tone="green">启用</Badge>;
+      return <Badge tone="green">开启</Badge>;
+    case 3:
+      return <Badge tone="rose">自动禁用</Badge>;
     case 2:
       return <Badge tone="slate">手动禁用</Badge>;
+    case 0:
+      return <Badge tone="slate">已关闭</Badge>;
+    default:
+      return <Badge tone="slate">未知</Badge>;
+  }
+}
+
+/** 渠道级状态徽章：1 正常 / 3 自动禁用 / 其它未知 */
+function channelBadge(status: number | null) {
+  switch (status) {
+    case 1:
+      return <Badge tone="green">正常</Badge>;
     case 3:
       return <Badge tone="rose">自动禁用</Badge>;
     default:
-      return <Badge tone="slate">未知</Badge>;
+      return <Badge tone="slate">-</Badge>;
   }
 }
 
@@ -81,7 +122,7 @@ function fmtUsd(v?: number) {
   })}`;
 }
 
-/** 可用 key 数 = 平台 key 数 − 禁用 key 数；任一缺失返回 null（显示「-」） */
+/** 聚合可用 key 数 = 平台 key 数 − 禁用 key 数；任一缺失返回 null（显示「-」） */
 function aliveKeyCount(channel: ChannelStatus): number | null {
   if (channel.platformKeyCount == null || channel.deadKeyCount == null) {
     return null;
@@ -89,170 +130,234 @@ function aliveKeyCount(channel: ChannelStatus): number | null {
   return channel.platformKeyCount - channel.deadKeyCount;
 }
 
-/** 「自动禁用」态：渠道有 key 但可用为 0（全死），即使 status 显示启用也需补 key */
+/** 「自动禁用」态：有 key 但可用为 0（全死） */
 function isExhausted(channel: ChannelStatus): boolean {
   return (channel.platformKeyCount ?? 0) > 0 && aliveKeyCount(channel) === 0;
 }
 
 /**
- * 共享渠道状态视图：是否存在、状态徽章、概览（含已上传 key 数）、
- * 顶层用量、模型 badges、各站点发布与用量。供用户面板与管理员弹窗复用。
+ * 共享渠道状态视图：上传进度（聚合）+ 已建渠道列表（每渠道 key/金额/站点开关）。
+ * onSiteToggle 存在时渲染站点开关（用户面板）；不存在时只读展示徽章（管理员查看）。
  */
-export function ChannelStatusView({ channel }: { channel: ChannelStatus | null }) {
+export function ChannelStatusView({
+  channel,
+  onSiteToggle,
+}: {
+  channel: ChannelStatus | null;
+  onSiteToggle?: (
+    channelId: number,
+    siteId: number,
+    on: boolean
+  ) => Promise<void>;
+}) {
   if (!channel) return null;
 
-  if (channel.exists === false) {
-    return (
-      <div className="space-y-4">
-        <UploadProgress channel={channel} />
-        <div className="rounded-lg bg-amber-50 px-4 py-6 text-center">
-          <Badge tone="amber">尚未创建</Badge>
-          <p className="mt-2 text-sm text-slate-500">
-            该渠道还未在平台创建，队列有 key 后由定时引擎自动创建并上传。
-          </p>
-        </div>
-      </div>
-    );
-  }
+  const channels = channel.channels ?? [];
 
   return (
     <div className="space-y-4">
-      <UploadProgress channel={channel} />
-
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-        <Stat label="渠道 ID" value={`#${channel.channelId ?? "-"}`} />
-        <Stat label="状态" value={statusBadge(channel.status)} />
-        <Stat label="类型" value={channel.type ?? "-"} />
-        <Stat label="分组" value={channel.group ?? "-"} />
-        <Stat label="优先级" value={channel.priority ?? "-"} />
-        <Stat label="累计上传站点(去重)" value={channel.uploadedKeyCount ?? 0} />
-        <Stat
-          label="平台 Key 数"
-          value={
-            channel.platformKeyCount == null ? "-" : channel.platformKeyCount
-          }
-        />
-        <Stat
-          label="禁用 Key 数"
-          value={
-            channel.deadKeyCount == null ? (
-              "-"
-            ) : (
-              <span
-                className={
-                  channel.deadKeyCount > 0 ? "text-rose-600" : undefined
-                }
-              >
-                {channel.deadKeyCount}
-              </span>
-            )
-          }
-        />
-        <Stat
-          label="可用 Key 数"
-          value={
-            aliveKeyCount(channel) == null ? (
-              "-"
-            ) : (
-              <span
-                className={isExhausted(channel) ? "text-rose-600" : undefined}
-              >
-                {aliveKeyCount(channel)}
-              </span>
-            )
-          }
-        />
-        <Stat
-          label="待上传站点(本地库)"
-          value={
-            channel.poolPending == null ? (
-              "-"
-            ) : (
-              <span
-                className={
-                  channel.poolPending > 0 ? "text-amber-600" : undefined
-                }
-              >
-                {channel.poolPending}
-              </span>
-            )
-          }
-        />
-        <Stat
-          label="已上传站点(本地库)"
-          value={channel.poolUploaded == null ? "-" : channel.poolUploaded}
-        />
+      {/* 突出展示：所有已建渠道的累计消费总金额 */}
+      <div className="flex items-end justify-between gap-3 rounded-xl border border-emerald-100 bg-gradient-to-br from-emerald-50 to-white px-4 py-3">
+        <div>
+          <div className="text-xs font-medium text-emerald-700/80">
+            累计消费金额（所有已建渠道）
+          </div>
+          <div className="mt-0.5 text-3xl font-bold tracking-tight text-emerald-600">
+            {fmtUsd(channel.usedAmount)}
+          </div>
+        </div>
+        <div className="text-right text-xs text-slate-400">
+          共 {channel.createdCount ?? channels.length} 个渠道
+        </div>
       </div>
 
+      <UploadProgress channel={channel} />
+
       <div className="grid grid-cols-2 gap-3">
-        <Stat
-          label="累计金额"
+        <Stat label="已建渠道数" value={channel.createdCount ?? channels.length} />
+        <Stat label="累计上传(去重)" value={channel.uploadedKeyCount ?? 0} />
+      </div>
+
+      <div>
+        <div className="mb-1 text-xs font-medium text-slate-500">已建渠道</div>
+        {channels.length > 0 ? (
+          <div className="space-y-2">
+            {channels.map((c) => (
+              <ChannelRow
+                key={c.id}
+                channel={c}
+                onSiteToggle={onSiteToggle}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-lg bg-amber-50 px-4 py-6 text-center">
+            <Badge tone="amber">尚未创建</Badge>
+            <p className="mt-2 text-sm text-slate-500">
+              还没有已建渠道。录入 key 后点「上传一批（新建渠道）」或由定时引擎自动新建。
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** 单个已建渠道行：名称/#id、状态、平台/可用 key、金额、站点开关。 */
+function ChannelRow({
+  channel,
+  onSiteToggle,
+}: {
+  channel: CreatedChannelView;
+  onSiteToggle?: (
+    channelId: number,
+    siteId: number,
+    on: boolean
+  ) => Promise<void>;
+}) {
+  const alive = channel.aliveKeyCount;
+  const platform = channel.platformKeyCount;
+  const exhausted = (platform ?? 0) > 0 && alive === 0;
+  // site_id → 远程渠道 id（本地落库的 publish_results），供站点行小字展示
+  const remoteBySite = new Map(
+    (channel.remoteSites ?? []).map((r) => [r.siteId, r])
+  );
+
+  return (
+    <div className="rounded-lg border border-slate-200 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-medium text-slate-800">
+            {channel.channelName}
+          </div>
+          <div className="mt-0.5 text-xs text-slate-400">#{channel.channelId}</div>
+        </div>
+        {channelBadge(channel.status)}
+      </div>
+
+      <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
+        <MiniStat
+          label="可用/平台"
+          value={
+            platform == null ? (
+              "-"
+            ) : (
+              <>
+                <span className={exhausted ? "text-rose-600" : undefined}>
+                  {alive == null ? "-" : alive}
+                </span>
+                <span className="text-slate-400"> / {platform}</span>
+              </>
+            )
+          }
+        />
+        <MiniStat label="本批 key" value={channel.keyCount} />
+        <MiniStat
+          label="金额"
           value={
             <span className="text-emerald-600">{fmtUsd(channel.usedAmount)}</span>
           }
         />
-        <Stat label="累计额度（quota）" value={channel.usedQuota ?? 0} />
       </div>
 
-      {channel.models && (
-        <div>
-          <div className="mb-1 text-xs font-medium text-slate-500">模型</div>
-          <div className="flex flex-wrap gap-1.5">
-            {channel.models
-              .split(",")
-              .map((m) => m.trim())
-              .filter(Boolean)
-              .map((m) => (
-                <Badge key={m} tone="slate">
-                  {m}
-                </Badge>
-              ))}
-          </div>
+      {channel.sites.length > 0 && (
+        <div className="mt-2 divide-y divide-slate-100 overflow-hidden rounded-lg border border-slate-200">
+          {channel.sites.map((s) => (
+            <SiteRow
+              key={s.site_id}
+              channelId={channel.channelId}
+              site={s}
+              remoteChannelId={remoteBySite.get(s.site_id)?.remoteChannelId}
+              onSiteToggle={onSiteToggle}
+            />
+          ))}
         </div>
       )}
+    </div>
+  );
+}
 
-      <div>
-        <div className="mb-1 text-xs font-medium text-slate-500">站点发布与用量</div>
-        {channel.siteAmounts && channel.siteAmounts.length > 0 ? (
-          <div className="overflow-hidden rounded-lg border border-slate-200">
-            <table className="w-full text-xs">
-              <thead className="bg-slate-50 text-slate-500">
-                <tr>
-                  <th className="px-3 py-2 text-left font-medium">站点</th>
-                  <th className="px-3 py-2 text-left font-medium">远端渠道 ID</th>
-                  <th className="px-3 py-2 text-right font-medium">金额</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {channel.siteAmounts.map((s) => (
-                  <tr key={s.site_id}>
-                    <td className="px-3 py-2 text-slate-700">{s.site_name}</td>
-                    <td className="px-3 py-2 text-slate-500">
-                      #{s.remote_channel_id}
-                    </td>
-                    <td className="px-3 py-2 text-right font-medium text-emerald-600">
-                      {fmtUsd(s.used_amount)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-              <tfoot className="border-t border-slate-200 bg-slate-50 text-slate-600">
-                <tr>
-                  <td className="px-3 py-2 font-medium" colSpan={2}>
-                    合计
-                  </td>
-                  <td className="px-3 py-2 text-right font-semibold text-emerald-700">
-                    {fmtUsd(channel.usedAmount)}
-                  </td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-        ) : (
-          <p className="text-xs text-slate-400">暂无站点发布明细</p>
+/** 单站点行：站名 + 状态徽章（+ 可选开关）。 */
+function SiteRow({
+  channelId,
+  site,
+  remoteChannelId,
+  onSiteToggle,
+}: {
+  channelId: number;
+  site: SiteScheduleStatus;
+  remoteChannelId?: number;
+  onSiteToggle?: (
+    channelId: number,
+    siteId: number,
+    on: boolean
+  ) => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const on = site.status === 1;
+
+  async function toggle(next: boolean) {
+    if (!onSiteToggle || busy) return;
+    setBusy(true);
+    try {
+      await onSiteToggle(channelId, site.site_id, next);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex items-center justify-between gap-3 px-3 py-2">
+      <div className="truncate text-xs text-slate-600">
+        {site.site_name}
+        <span className="ml-1 text-slate-400">#{site.site_id}</span>
+        {remoteChannelId != null && remoteChannelId > 0 && (
+          <span
+            className="ml-1 text-slate-400"
+            title="该站点上的远程渠道 id"
+          >
+            · 远程 #{remoteChannelId}
+          </span>
+        )}
+      </div>
+      <div className="flex items-center gap-2">
+        {siteBadge(site.status)}
+        {busy && <Spinner className="h-4 w-4 text-slate-400" />}
+        {onSiteToggle && (
+          <Toggle on={on} disabled={busy} onChange={toggle} />
         )}
       </div>
     </div>
+  );
+}
+
+/** 纯 Tailwind 开关。 */
+function Toggle({
+  on,
+  disabled,
+  onChange,
+}: {
+  on: boolean;
+  disabled: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      disabled={disabled}
+      onClick={() => onChange(!on)}
+      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition disabled:cursor-not-allowed disabled:opacity-50 ${
+        on ? "bg-emerald-500" : "bg-slate-300"
+      }`}
+    >
+      <span
+        className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition ${
+          on ? "translate-x-6" : "translate-x-1"
+        }`}
+      />
+    </button>
   );
 }
 
@@ -265,15 +370,24 @@ function Stat({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
+function MiniStat({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div className="rounded-md bg-slate-50 px-2 py-1.5">
+      <div className="text-[10px] text-slate-400">{label}</div>
+      <div className="mt-0.5 font-medium text-slate-700">{value}</div>
+    </div>
+  );
+}
+
 /**
  * 上传进度。术语：
- * 「录入」= 已保存到本系统数据库（本地库）；「上传」= 已推送到 naci 站点。
- * 已录入 = 待上传站点 + 已上传站点。
+ * 「录入」= 已保存到本系统数据库（本地库）；「上传」= 已建成渠道推送到 naci 站点。
+ * 已录入 = 待上传 + 已上传。
  */
 function UploadProgress({ channel }: { channel: ChannelStatus }) {
-  const uploaded = channel.poolUploaded ?? 0; // 已上传站点
-  const pending = channel.poolPending ?? 0; // 待上传站点
-  const recorded = uploaded + pending; // 已录入（本地库）
+  const uploaded = channel.poolUploaded ?? 0;
+  const pending = channel.poolPending ?? 0;
+  const recorded = uploaded + pending;
   const pct = recorded > 0 ? Math.round((uploaded / recorded) * 100) : 0;
   const batch = channel.uploadBatchSize ?? 0;
   const remainingBatches = batch > 0 ? Math.ceil(pending / batch) : 0;
@@ -288,9 +402,9 @@ function UploadProgress({ channel }: { channel: ChannelStatus }) {
         <div className="flex flex-wrap items-center justify-end gap-2">
           {exhausted && <Badge tone="rose">自动禁用 · 无可用 Key</Badge>}
           {auto === false ? (
-            <Badge tone="rose">自动补 key 已关闭</Badge>
+            <Badge tone="rose">自动建渠道已关闭</Badge>
           ) : (
-            <Badge tone="green">自动补 key 运行中</Badge>
+            <Badge tone="green">自动建渠道运行中</Badge>
           )}
         </div>
       </div>
@@ -298,11 +412,11 @@ function UploadProgress({ channel }: { channel: ChannelStatus }) {
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <BigStat label="已录入(本地库)" value={recorded} />
         <BigStat
-          label="待上传站点"
+          label="待上传"
           value={pending}
           tone={pending > 0 ? "amber" : undefined}
         />
-        <BigStat label="已上传站点" value={uploaded} />
+        <BigStat label="已上传" value={uploaded} />
         <BigStat
           label="可用 / 平台 Key"
           value={
@@ -326,7 +440,7 @@ function UploadProgress({ channel }: { channel: ChannelStatus }) {
       {/* 进度条 */}
       <div className="mt-3">
         <div className="mb-1 flex justify-between text-xs text-slate-500">
-          <span>{`已上传站点 ${uploaded} / 已录入 ${recorded}`}</span>
+          <span>{`已上传 ${uploaded} / 已录入 ${recorded}`}</span>
           <span>{pct}%</span>
         </div>
         <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
@@ -354,8 +468,7 @@ function UploadProgress({ channel }: { channel: ChannelStatus }) {
         </span>
         {pending > 0 && batch > 0 && (
           <span>
-            待上传站点约 <b className="text-slate-700">{remainingBatches}</b> 批（每批约 1 分钟，≈{" "}
-            {remainingBatches} 分钟传完）
+            待上传约 <b className="text-slate-700">{remainingBatches}</b> 批（每批 1 个新渠道）
           </span>
         )}
       </div>
@@ -386,7 +499,7 @@ function BigStat({
   );
 }
 
-/** 下一次检查倒计时（每秒刷新）。倒计时归零后显示「检查中…」，等待轮询拿到新的时间。 */
+/** 下一次检查倒计时（每秒刷新）。 */
 function NextCheck({
   at,
   checking,
@@ -406,7 +519,33 @@ function NextCheck({
   return <>{s > 0 ? `约 ${s} 秒后` : <span className="text-brand-600">检查中…</span>}</>;
 }
 
-/** 相对时间「X 前」文案（不含组件状态）。 */
+/**
+ * 缓存刷新倒计时（放刷新按钮旁）：naci 实时数据是 30s 缓存快照。
+ */
+export function CacheRefreshCountdown({
+  cachedAt,
+  ttlMs,
+}: {
+  cachedAt?: string | null;
+  ttlMs?: number;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  if (!cachedAt || !ttlMs) return null;
+  const expireAt = new Date(cachedAt).getTime() + ttlMs;
+  const s = Math.max(0, Math.round((expireAt - now) / 1000));
+  return (
+    <span className="text-xs text-slate-400" title="渠道数据为缓存快照，到点后自动取最新">
+      {s > 0 ? `缓存 · 约 ${s} 秒后刷新` : "缓存 · 刷新中…"}
+    </span>
+  );
+}
+
+/** 相对时间「X 前」文案。 */
 function relativeTime(atMs: number, now: number): string {
   const s = Math.max(0, Math.round((now - atMs) / 1000));
   if (s < 60) return `${s} 秒前`;
@@ -418,14 +557,13 @@ function relativeTime(atMs: number, now: number): string {
 /** 检查结果状态 → 圆点颜色。 */
 function statusDot(status: string): string {
   switch (status) {
-    case "alive":
+    case "created":
       return "bg-emerald-500";
-    case "exhausted":
-    case "missing":
+    case "paused":
       return "bg-amber-500";
-    case "manual":
+    case "empty":
       return "bg-slate-400";
-    case "unreadable":
+    case "error":
       return "bg-rose-500";
     default:
       return "bg-slate-400";

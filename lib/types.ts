@@ -17,6 +17,8 @@ export interface User {
   platformKeyCount?: number | null;
   /** 平台上被禁用（status=3）的 key 数缓存 */
   deadKeyCount?: number | null;
+  /** 所有已建渠道的聚合已用额度缓存（naci used-quota，单位同平台 quota；÷QUOTA_PER_USD=美元） */
+  usedQuota?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -32,18 +34,10 @@ export interface SystemConfig {
   naciToken?: string;
   /** 定时引擎每批从本地 key 池取出并上传的数量（1~1000） */
   uploadBatchSize: number;
-  /** 是否启用自动补 key（定时引擎每分钟从本地池批量上传） */
+  /** 是否启用自动补 key（定时引擎每 N 分钟从本地池按需补给） */
   autoRefillEnabled: boolean;
-}
-
-/** 入池（enqueue）结果：key 先落本地池，由定时引擎逐批上传。 */
-export interface EnqueueResult {
-  /** 本次新增入池的 key 数（去重后） */
-  added: number;
-  /** 该渠道池内待上传（pending）的 key 数 */
-  poolPending: number;
-  /** 该渠道池内已上传（uploaded）的 key 数 */
-  poolUploaded: number;
+  /** 定时引擎补给间隔（分钟，1~1440）；改动下一轮生效，无需重启 */
+  refillIntervalMinutes: number;
 }
 
 export type LogLevel = "info" | "success" | "warn" | "error";

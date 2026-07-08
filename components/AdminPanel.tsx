@@ -49,13 +49,16 @@ interface ConfigResponse {
   naciBaseUrl: string;
   naciUsername: string;
   hasNaciPassword: boolean;
-  /** 每批上传数量（定时引擎每分钟从队列取的批量大小） */
+  /** 每批上传数量（定时引擎每轮从队列取的批量大小） */
   uploadBatchSize: number;
-  /** 是否启用自动补 key（每分钟从本地队列批量上传） */
+  /** 是否启用自动补 key（按间隔从本地队列批量上传） */
   autoRefillEnabled: boolean;
+  /** 定时引擎补给间隔（分钟，1~1440） */
+  refillIntervalMinutes: number;
 }
 
 const DEFAULT_BATCH_SIZE = 20;
+const DEFAULT_INTERVAL_MINUTES = 1;
 
 function ConfigCard() {
   const toast = useToast();
@@ -64,6 +67,9 @@ function ConfigCard() {
   const [password, setPassword] = useState("");
   const [hasPassword, setHasPassword] = useState(false);
   const [batchSize, setBatchSize] = useState<number>(DEFAULT_BATCH_SIZE);
+  const [intervalMin, setIntervalMin] = useState<number>(
+    DEFAULT_INTERVAL_MINUTES
+  );
   const [autoRefill, setAutoRefill] = useState(true);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -91,6 +97,12 @@ function ConfigCard() {
           ? data.uploadBatchSize
           : DEFAULT_BATCH_SIZE
       );
+      setIntervalMin(
+        typeof data.refillIntervalMinutes === "number" &&
+          data.refillIntervalMinutes > 0
+          ? data.refillIntervalMinutes
+          : DEFAULT_INTERVAL_MINUTES
+      );
       setAutoRefill(Boolean(data.autoRefillEnabled));
       setPassword("");
     } catch (err) {
@@ -116,6 +128,11 @@ function ConfigCard() {
       1000,
       Math.max(1, Math.round(Number(batchSize) || DEFAULT_BATCH_SIZE))
     );
+    // 补给间隔夹到 1~1440 分钟
+    const safeInterval = Math.min(
+      1440,
+      Math.max(1, Math.round(Number(intervalMin) || DEFAULT_INTERVAL_MINUTES))
+    );
     setSaving(true);
     try {
       // naciPassword 留空 = 保持原密码不变（后端约定）
@@ -127,6 +144,7 @@ function ConfigCard() {
           naciPassword: password,
           uploadBatchSize: safeBatch,
           autoRefillEnabled: autoRefill,
+          refillIntervalMinutes: safeInterval,
         }),
       });
       toast.success("配置已保存");
@@ -213,10 +231,10 @@ function ConfigCard() {
             </Field>
           </div>
 
-          <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-3 md:grid-cols-3">
             <Field
               label="每批上传数量"
-              hint="后端每分钟从本地库批量上传到站点，每批 N 个，上传后自动启用三站"
+              hint="后端每轮从本地库批量上传到站点，每批 N 个，上传后自动启用三站"
             >
               <TextInput
                 type="number"
@@ -227,7 +245,23 @@ function ConfigCard() {
                 placeholder={String(DEFAULT_BATCH_SIZE)}
               />
             </Field>
-            <Field label="自动补 key" hint="关闭后不再自动上传到站点，仅录入本地库">
+            <Field
+              label="补给间隔（分钟）"
+              hint="定时引擎每 N 分钟检查并按需补给一次，1~1440，改后下一轮生效"
+            >
+              <TextInput
+                type="number"
+                min={1}
+                max={1440}
+                value={Number.isNaN(intervalMin) ? "" : intervalMin}
+                onChange={(e) => setIntervalMin(e.target.valueAsNumber)}
+                placeholder={String(DEFAULT_INTERVAL_MINUTES)}
+              />
+            </Field>
+            <Field
+              label="自动建渠道"
+              hint="关闭后定时引擎不再自动建渠道；手动「上传一批 / 直接上传」按钮仍可用"
+            >
               <label className="flex cursor-pointer items-center gap-2 py-2 text-sm text-slate-700">
                 <input
                   type="checkbox"
@@ -259,6 +293,18 @@ interface AdminUserRow extends SafeUser {
   deadKeyCount?: number | null;
   poolPending?: number;
   poolUploaded?: number;
+  createdChannelCount?: number;
+  /** 累计金额（美元），后端由缓存的聚合 used_quota 换算；null 表示尚无数据 */
+  usedAmount?: number | null;
+}
+
+/** 美元金额展示：$ + 千分位 + 2 位小数（非数值按 $0.00）。 */
+function fmtUsd(v?: number | null) {
+  const n = typeof v === "number" && !Number.isNaN(v) ? v : 0;
+  return `$${n.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
 }
 
 /** 用户列表轮询间隔（毫秒） */
@@ -394,7 +440,7 @@ function UsersCard() {
   return (
     <Card
       title="用户管理"
-      subtitle="每个用户对应一个访问密钥与一个绑定渠道"
+      subtitle="每个用户对应一个访问密钥与一个渠道前缀"
       actions={
         <>
           {lastRefreshedAt && (
@@ -413,17 +459,18 @@ function UsersCard() {
         <EmptyRow text="暂无用户" />
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1040px] text-sm">
+          <table className="w-full min-w-[1160px] text-sm">
             <thead className="text-left text-xs text-slate-500">
               <tr className="border-b border-slate-100">
                 <th className="py-2 pr-3 font-medium">用户名</th>
                 <th className="py-2 pr-3 font-medium">角色</th>
-                <th className="py-2 pr-3 font-medium">绑定渠道</th>
-                <th className="py-2 pr-3 font-medium">渠道状态</th>
+                <th className="py-2 pr-3 font-medium">渠道前缀</th>
+                <th className="py-2 pr-3 text-right font-medium">已建渠道</th>
                 <th className="py-2 pr-3 text-right font-medium">可用/平台Key</th>
                 <th className="py-2 pr-3 text-right font-medium">禁用</th>
-                <th className="py-2 pr-3 text-right font-medium">待上传站点</th>
-                <th className="py-2 pr-3 text-right font-medium">已上传站点</th>
+                <th className="py-2 pr-3 text-right font-medium">累计金额</th>
+                <th className="py-2 pr-3 text-right font-medium">待上传</th>
+                <th className="py-2 pr-3 text-right font-medium">已上传</th>
                 <th className="py-2 pr-3 font-medium">访问密钥</th>
                 <th className="py-2 pr-3 text-right font-medium">操作</th>
               </tr>
@@ -440,11 +487,11 @@ function UsersCard() {
                     </Badge>
                   </td>
                   <td className="py-2 pr-3 text-slate-600">{u.channelName}</td>
-                  <td className="py-2 pr-3">
-                    {u.channelId ? (
-                      <Badge tone="green">#{u.channelId}</Badge>
+                  <td className="py-2 pr-3 text-right tabular-nums">
+                    {(u.createdChannelCount ?? 0) > 0 ? (
+                      <Badge tone="green">{u.createdChannelCount}</Badge>
                     ) : (
-                      <Badge tone="amber">未创建</Badge>
+                      <Badge tone="slate">0</Badge>
                     )}
                   </td>
                   <td className="py-2 pr-3 text-right tabular-nums">
@@ -460,6 +507,15 @@ function UsersCard() {
                         }
                       >
                         {u.deadKeyCount}
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-2 pr-3 text-right tabular-nums">
+                    {u.usedAmount == null ? (
+                      <span className="text-slate-400">-</span>
+                    ) : (
+                      <span className="font-medium text-emerald-600">
+                        {fmtUsd(u.usedAmount)}
                       </span>
                     )}
                   </td>
@@ -525,6 +581,11 @@ function UsersCard() {
         open={!!uploadTarget}
         title={uploadTarget ? `代传 Key · ${uploadTarget.username}` : "代传 Key"}
         endpoint={uploadTarget ? `/api/admin/users/${uploadTarget.id}/upload` : ""}
+        directEndpoint={
+          uploadTarget
+            ? `/api/admin/users/${uploadTarget.id}/upload-direct`
+            : undefined
+        }
         onClose={() => setUploadTarget(null)}
         onUploaded={() => load()}
       />
@@ -544,7 +605,7 @@ function UsersCard() {
         ) : (
           <div className="space-y-3">
             <p className="text-sm text-slate-500">
-              绑定渠道名：
+              渠道前缀：
               <b className="text-slate-700">{channelTarget?.channelName}</b>
             </p>
             <ChannelStatusView channel={channelData} />

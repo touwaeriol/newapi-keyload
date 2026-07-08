@@ -1,12 +1,14 @@
 import { NextRequest } from "next/server";
 import { errorResponse, fail, ok, requireAdmin } from "@/lib/auth";
 import {
+  createdChannelCountsAll,
   genAccessKey,
   genId,
   getUsers,
   poolCountsAll,
   upsertUser,
 } from "@/lib/store";
+import { QUOTA_PER_USD } from "@/lib/naci";
 import type { Role, User } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -16,10 +18,22 @@ export const dynamic = "force-dynamic";
 export async function GET(req: NextRequest) {
   try {
     await requireAdmin(req);
-    const [users, poolMap] = await Promise.all([getUsers(), poolCountsAll()]);
+    const [users, poolMap, createdMap] = await Promise.all([
+      getUsers(),
+      poolCountsAll(),
+      createdChannelCountsAll(),
+    ]);
     const withPool = users.map((u) => {
       const p = poolMap[u.channelName] ?? { pending: 0, uploaded: 0 };
-      return { ...u, poolPending: p.pending, poolUploaded: p.uploaded };
+      return {
+        ...u,
+        poolPending: p.pending,
+        poolUploaded: p.uploaded,
+        createdChannelCount: createdMap[u.channelName] ?? 0,
+        // 累计金额（美元）：由缓存的聚合 used_quota 换算，缺失则为 null（前端显示「-」）。
+        usedAmount:
+          u.usedQuota == null ? null : u.usedQuota / QUOTA_PER_USD,
+      };
     });
     return ok({ users: withPool });
   } catch (err) {

@@ -1,40 +1,48 @@
-// 定时补 key 引擎（按需补给 + 缓存刷新）：每 60s 遍历「所有已解析出 channelId 的绑定渠道」
-// 与「所有仍有 pending key 的渠道」的并集，对每个渠道用只读端点 status-batch 检测一次
-// （assessRefillNeed：既把真实 multiKeySize/deadCount 写回用户缓存，让管理员列表 ≤60s 新鲜，
-// 又判断是否缺 key）。仅当该渠道「缺 key（不存在 / 存活 key=0 自动禁用）」**且有 pending key**
-// 时，才从本地池取「配置的每批数量」个 key 批量 append 并重开三站；否则只刷新缓存、不补，
-// 把 key 留在池里等下次真正缺 key 时再补。
+// 定时引擎（新模型：自动建新渠道 + 缓存刷新）：每 N 分钟遍历「仍有 pending key 的前缀」
+// 与「已建过渠道的前缀」的并集。对有 pending 的前缀，当自动补给开启时从本地池逐批建新渠道
+//（每批数量=配置 uploadBatchSize，单轮上限防止一次建太多）；对无 pending 的前缀只刷新其
+// 已建渠道的实时缓存（让管理员列表 key 统计 ≤N 分钟新鲜）。
 //
 // 单例守卫挂 globalThis，兼容 Next dev 热重载 / standalone 多次 import，避免重复启动定时器。
 // 引擎内任何异常都被捕获，绝不让 tick 抛出而中断定时器或 crash 进程。
-import { assessRefillNeed, pushBatchToChannel } from "./channelService";
 import {
-  addLog,
+  createChannelsDrain,
+  refreshPrefixRealtime,
+  MAX_CHANNELS_PER_DRAIN,
+} from "./channelService";
+import {
   channelsWithPending,
-  clampBatchSize,
+  clampIntervalMinutes,
+  findUserByChannelName,
   getConfig,
-  getUsers,
-  markPoolUploaded,
-  nextPendingBatch,
+  poolCounts,
+  prefixesWithCreatedChannels,
+  reclaimStaleClaimed,
 } from "./store";
 
-const TICK_INTERVAL_MS = 60_000;
+/** 补给间隔默认值（分钟）——首个 tick 读到配置前的兜底，与 store 的 seed 一致。 */
+const DEFAULT_INTERVAL_MS = 60_000;
 const INITIAL_DELAY_MS = 5_000;
+/** 单轮单前缀最多自动新建的渠道数（防止一次 paste 太多把 naci 打爆）。与直传共用同一上限。 */
+const MAX_CHANNELS_PER_TICK = MAX_CHANNELS_PER_DRAIN;
+/** claimed 死行回收阈值（分钟）：超过则视为进程崩溃残留，退回 pending 重试。 */
+const CLAIM_STALE_MINUTES = 10;
 
-/** 单渠道最近一次检查结果（供前端展示「上次检查做了什么/结果如何」）。 */
+/** 单前缀最近一次检查结果（供前端展示「上次检查做了什么/结果如何」）。 */
 export interface LastCheckResult {
   at: number; // 检查完成时间戳(ms)
-  status: "missing" | "exhausted" | "alive" | "manual" | "unreadable";
+  status: "created" | "empty" | "paused" | "error";
   message: string; // 人类可读的结果/执行说明
 }
 
 interface EngineState {
   started: boolean;
   isRunning: boolean;
-  timer: ReturnType<typeof setInterval> | null;
+  timer: ReturnType<typeof setTimeout> | null;
   lastTickAt: number | null; // 上次调度开始时间戳(ms)
   nextTickAt: number | null; // 预计下次调度时间戳(ms)
-  lastResults: Record<string, LastCheckResult>; // 按渠道名记录最近一次检查结果
+  intervalMs: number; // 当前生效的补给间隔(ms)，每轮 tick 从配置刷新
+  lastResults: Record<string, LastCheckResult>; // 按前缀记录最近一次检查结果
 }
 
 function engineState(): EngineState {
@@ -46,22 +54,24 @@ function engineState(): EngineState {
       timer: null,
       lastTickAt: null,
       nextTickAt: null,
+      intervalMs: DEFAULT_INTERVAL_MS,
       lastResults: {},
     };
-  } else if (!g.__keyloadEngine.lastResults) {
-    // 兼容旧单例（热重载时已存在但无该字段）
-    g.__keyloadEngine.lastResults = {};
+  } else {
+    if (!g.__keyloadEngine.lastResults) g.__keyloadEngine.lastResults = {};
+    if (!g.__keyloadEngine.intervalMs)
+      g.__keyloadEngine.intervalMs = DEFAULT_INTERVAL_MS;
   }
   return g.__keyloadEngine;
 }
 
-/** 记录某渠道本轮检查结果（覆盖上一轮）。 */
+/** 记录某前缀本轮检查结果（覆盖上一轮）。 */
 function recordResult(
-  channelName: string,
+  prefix: string,
   status: LastCheckResult["status"],
   message: string
 ): void {
-  engineState().lastResults[channelName] = { at: Date.now(), status, message };
+  engineState().lastResults[prefix] = { at: Date.now(), status, message };
 }
 
 /** 引擎调度状态：供前端展示「下一次检查」等。 */
@@ -73,7 +83,7 @@ export function getEngineStatus(): {
 } {
   const s = engineState();
   return {
-    intervalMs: TICK_INTERVAL_MS,
+    intervalMs: s.intervalMs,
     lastTickAt: s.lastTickAt,
     nextTickAt: s.nextTickAt,
     running: s.isRunning,
@@ -82,160 +92,141 @@ export function getEngineStatus(): {
 
 async function safeLog(
   level: "info" | "warn" | "error",
-  channelName: string | undefined,
+  prefix: string | undefined,
   message: string
 ): Promise<void> {
   try {
-    await addLog({ level, actor: "engine", channelName, message });
+    const { addLog } = await import("./store");
+    await addLog({ level, actor: "engine", channelName: prefix, message });
   } catch {
     // 日志写入失败不影响引擎主流程
   }
 }
 
 /**
- * 处理单个渠道（只读检测 + 按需补一批）：assessRefillNeed 一次 status-batch 既刷新真实统计缓存、
- * 又判定是否缺 key；仅当「缺 key」且池里确有 pending（nextPendingBatch 非空）时才上传一批并重开三站，
- * 否则只记录检查结论。异常自行捕获记 error（不外抛，key 保持 pending 下轮/下次重试）。
+ * 处理单个前缀：
+ * - 有 pending 且自动补给开启 → 从池逐批建新渠道（单轮上限 MAX_CHANNELS_PER_TICK）。
+ * - 有 pending 但自动补给关闭 → 不建，仅记录（等用户手动上传）。
+ * - 无 pending → 刷新已建渠道实时缓存。
+ * 异常自行捕获记 error（不外抛，key 保持 pending 下轮/手动重试）。
  */
-async function processChannel(
-  channelName: string,
-  batchSize: number
+async function processPrefix(
+  prefix: string,
+  autoRefill: boolean
 ): Promise<void> {
   try {
-    const decision = await assessRefillNeed(channelName);
-    if (decision.status === "unreadable") {
-      recordResult(
-        channelName,
-        "unreadable",
-        "读取渠道状态失败，本轮跳过，稍后重试"
-      );
-      await safeLog(
-        "warn",
-        channelName,
-        "只读检测渠道状态失败，本轮跳过（保留缓存，下轮重试）"
-      );
+    const user = await findUserByChannelName(prefix);
+    if (!user) {
+      // 池里有 key 但没有绑定该前缀的用户：跳过（无法回写统计）
+      recordResult(prefix, "empty", "无绑定用户，跳过");
       return;
     }
 
-    const p = decision.platformKeyCount;
-    const d = decision.deadKeyCount;
-    const alive = decision.aliveKeyCount;
-    const stats = p != null && d != null ? `（平台 ${p}/禁用 ${d}）` : "";
+    const { pending } = await poolCounts(prefix);
 
-    // 缺 key 时才尝试取一批；nextPendingBatch 空即池无待上传，退回记录结论
-    if (decision.needsKeys) {
-      const batch = await nextPendingBatch(channelName, batchSize);
-      if (batch.length > 0) {
-        await pushBatchToChannel(
-          channelName,
-          batch.map((b) => b.key)
-        );
-        await markPoolUploaded(batch.map((b) => b.id));
+    if (pending > 0 && autoRefill) {
+      const drain = await createChannelsDrain(user, MAX_CHANNELS_PER_TICK);
+      if (drain.createdChannels > 0) {
         recordResult(
-          channelName,
-          decision.status,
-          decision.status === "missing"
-            ? `渠道原不存在，已创建并上传 ${batch.length} 个 key`
-            : `无可用 key${stats}，已补充上传 ${batch.length} 个 key`
+          prefix,
+          "created",
+          `自动新建 ${drain.createdChannels} 个渠道，共上传 ${drain.pushed} 个 key（剩余待上传 ${drain.poolPending}）`
         );
-        return;
+      } else {
+        recordResult(prefix, "empty", "队列已空，等待新 key");
       }
+      return;
     }
 
-    // 未上传：记录检查结论
-    switch (decision.status) {
-      case "alive":
-        recordResult(channelName, "alive", `可用 ${alive} 个 key${stats}，无需补给`);
-        break;
-      case "exhausted":
-        recordResult(
-          channelName,
-          "exhausted",
-          `无可用 key${stats}，队列已空，等待新 key`
-        );
-        break;
-      case "missing":
-        recordResult(channelName, "missing", "渠道未创建，队列暂无可上传 key");
-        break;
-      case "manual":
-        recordResult(
-          channelName,
-          "manual",
-          `渠道被手动禁用${stats}，跳过自动补给`
-        );
-        break;
+    if (pending > 0 && !autoRefill) {
+      recordResult(
+        prefix,
+        "paused",
+        `自动补给已关闭，${pending} 个待上传，等待手动上传`
+      );
+      // 仍刷新已建渠道缓存
+      await refreshPrefixRealtime(user);
+      return;
     }
+
+    // 无 pending：刷新已建渠道实时缓存（让管理员列表统计保持新鲜）
+    await refreshPrefixRealtime(user);
+    recordResult(prefix, "empty", "队列已空，无需新建渠道");
   } catch (err) {
-    // 单渠道失败不影响其它渠道；key 未标记 uploaded，下轮/下次重试
     recordResult(
-      channelName,
-      "unreadable",
-      `补给失败：${err instanceof Error ? err.message : String(err)}`
+      prefix,
+      "error",
+      `处理失败：${err instanceof Error ? err.message : String(err)}`
     );
     await safeLog(
       "error",
-      channelName,
-      `补给失败：${err instanceof Error ? err.message : String(err)}`
+      prefix,
+      `处理失败：${err instanceof Error ? err.message : String(err)}`
     );
   }
 }
 
 /**
- * 单次调度（按需补给 + 缓存刷新）：遍历「已解析出 channelId 的绑定渠道」∪「有 pending 的渠道」，
- * 逐个（串行）processChannel。isRunning 防重入。
+ * 单次调度：遍历「有 pending 的前缀」∪「已建过渠道的前缀」，逐个（串行）processPrefix。
+ * isRunning 防重入。
  */
 export async function tick(): Promise<void> {
   const state = engineState();
-  if (state.isRunning) return; // 上一轮未结束，跳过
+  if (state.isRunning) return;
   state.isRunning = true;
   state.lastTickAt = Date.now();
   try {
     const cfg = await getConfig();
-    if (!cfg.autoRefillEnabled) return; // 自动补 key 关闭
-    const batchSize = clampBatchSize(cfg.uploadBatchSize);
+    state.intervalMs = clampIntervalMinutes(cfg.refillIntervalMinutes) * 60_000;
+    const autoRefill = cfg.autoRefillEnabled;
 
-    // 目标渠道 = 已解析出 channelId 的绑定渠道（需刷新缓存）∪ 有 pending 的渠道（可能需补/首建）。
-    const users = await getUsers();
-    const resolvedBound = users
-      .filter((u) => u.channelName.trim().length > 0 && u.channelId != null)
-      .map((u) => u.channelName.trim());
-    const pendingChannels = await channelsWithPending();
+    // 回收崩溃残留的 claimed 死行（退回 pending），再统计待处理前缀。
+    try {
+      const reclaimed = await reclaimStaleClaimed(CLAIM_STALE_MINUTES);
+      if (reclaimed > 0) {
+        await safeLog(
+          "warn",
+          undefined,
+          `回收 ${reclaimed} 个滞留认领(claimed>${CLAIM_STALE_MINUTES}分钟)的 key，已退回待上传`
+        );
+      }
+    } catch (err) {
+      console.error("[engine] reclaimStaleClaimed 失败:", err);
+    }
+
+    const pendingPrefixes = await channelsWithPending();
+    const createdPrefixes = await prefixesWithCreatedChannels();
     const targets = Array.from(
-      new Set([...resolvedBound, ...pendingChannels])
+      new Set([...pendingPrefixes, ...createdPrefixes])
     );
 
-    for (const channelName of targets) {
-      await processChannel(channelName, batchSize);
+    for (const prefix of targets) {
+      await processPrefix(prefix, autoRefill);
     }
   } catch (err) {
-    // 顶层兜底：绝不让 tick 抛出
     console.error("[engine] tick 失败:", err);
   } finally {
     state.isRunning = false;
-    state.nextTickAt = Date.now() + TICK_INTERVAL_MS;
   }
 }
 
 /**
- * 用户上传 key 后立即 kick 一次（只处理该渠道），避免等待整分钟定时轮。
- * **已有调度在跑（isRunning）则直接忽略**：交给当前那轮或下一轮处理（用户要求「除非已有任务再进行」）。
- * fire-and-forget：同步返回，实际补给在后台异步执行，不阻塞上传响应。
+ * 用户上传 key 后立即 kick 一次（只处理该前缀），避免等待整分钟定时轮。
+ * **已有调度在跑（isRunning）则直接忽略**：交给当前那轮或下一轮处理。
+ * fire-and-forget：同步返回，实际建渠道在后台异步执行，不阻塞上传响应。
  */
-export function kickEngine(channelName: string): void {
+export function kickEngine(prefix: string): void {
   const state = engineState();
-  if (state.isRunning) return; // 已有任务在跑，交给它/下一轮
-  const name = channelName.trim();
+  if (state.isRunning) return;
+  const name = prefix.trim();
   if (!name) return;
   void (async () => {
-    // 再次判重并同步置位（Node 单线程，置位前无 await，不会与 tick 并发）
     if (state.isRunning) return;
     state.isRunning = true;
     state.lastTickAt = Date.now();
     try {
       const cfg = await getConfig();
-      if (!cfg.autoRefillEnabled) return; // 自动补 key 关闭
-      const batchSize = clampBatchSize(cfg.uploadBatchSize);
-      await processChannel(name, batchSize);
+      await processPrefix(name, cfg.autoRefillEnabled);
     } catch (err) {
       console.error("[engine] kick 失败:", err);
     } finally {
@@ -244,20 +235,33 @@ export function kickEngine(channelName: string): void {
   })();
 }
 
+/**
+ * 跑一次 tick 并按「当前生效间隔」安排下一次（自调度 setTimeout 链）。
+ */
+async function runAndReschedule(): Promise<void> {
+  const state = engineState();
+  try {
+    await tick();
+  } finally {
+    const delay = state.intervalMs > 0 ? state.intervalMs : DEFAULT_INTERVAL_MS;
+    state.nextTickAt = Date.now() + delay;
+    if (state.timer) clearTimeout(state.timer);
+    state.timer = setTimeout(() => {
+      void runAndReschedule();
+    }, delay);
+  }
+}
+
 /** 启动定时引擎（幂等，重复调用只启动一次）。 */
 export function startEngine(): void {
   const state = engineState();
   if (state.started) return;
   state.started = true;
 
-  // 启动后先延迟一小段跑一次（等 DB/首次请求初始化），之后每分钟一次
   state.nextTickAt = Date.now() + INITIAL_DELAY_MS;
-  setTimeout(() => {
-    void tick();
+  state.timer = setTimeout(() => {
+    void runAndReschedule();
   }, INITIAL_DELAY_MS);
-  state.timer = setInterval(() => {
-    void tick();
-  }, TICK_INTERVAL_MS);
 
-  console.log("[engine] 定时补 key 引擎已启动（每 60s 调度一次）");
+  console.log("[engine] 定时建渠道引擎已启动（间隔按系统配置，可在后台调整）");
 }

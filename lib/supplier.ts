@@ -21,8 +21,8 @@ export const FIXED_GROUP = "anthropic";
 export const OWNER_USER_ID = 18;
 
 /**
- * 供应商发布的站点（实测 5409 均发布到这三站）。
- * site_group_overrides / last_selected_site_ids_json 均以此为准。
+ * 供应商已知的全部站点（实测 5409 均发布到这三站）。
+ * 展示/校验用全集；实际发布到哪些站以 PUBLISH_SITES 为准（会排除 ai 站）。
  */
 export const SITES = [
   { site_id: 6, site_name: "AC站" },
@@ -30,19 +30,43 @@ export const SITES = [
   { site_id: 21, site_name: "61 站" },
 ];
 
-/** 各站点的分组覆盖（admin-hub 发布时指定每个站点归属的分组） */
-export const SITE_GROUP_OVERRIDES: Record<string, string[]> = {
+/**
+ * 需要停发的站点 site_id 列表。默认空 = 发布到全部站点 [21,13,6]（照示例请求体）。
+ * ⚠️ 日后若要停发某站，把其 site_id 填进来即可（如 [13] 表示不再发 AGT 站），其余全自动跟着变。
+ */
+export const EXCLUDED_SITE_IDS: number[] = [];
+
+/** 实际发布/重开的站点集合 = 全部站点去掉 EXCLUDED_SITE_IDS。 */
+export const PUBLISH_SITES = SITES.filter(
+  (s) => !EXCLUDED_SITE_IDS.includes(s.site_id)
+);
+
+/** 各站点的分组（全集）；发布时只取 PUBLISH_SITES 对应的子集。 */
+const SITE_GROUPS: Record<string, string[]> = {
   "6": ["anthropic", "default"],
   "13": ["anthropic"],
   "21": ["anthropic"],
 };
 
-/** 上次选择的站点顺序（admin-hub 要求的字符串化数组），发布到 21/13/6 三站 */
-export const LAST_SELECTED_SITE_IDS_JSON = "[21,13,6]";
+/** 站点分组覆盖（admin-hub 发布时指定每站归属分组）——按 PUBLISH_SITES 动态生成。 */
+export const SITE_GROUP_OVERRIDES: Record<string, string[]> = Object.fromEntries(
+  PUBLISH_SITES.map((s) => [
+    String(s.site_id),
+    SITE_GROUPS[String(s.site_id)] ?? ["anthropic"],
+  ])
+);
 
-/** 渠道高级设置（setting 字段，JSON 字符串） */
+/**
+ * 上次选择的站点顺序（admin-hub 要求的字符串化数组）。
+ * 保持原 [21,13,6] 顺序并去掉 EXCLUDED_SITE_IDS（默认空 → "[21,13,6]"）。
+ */
+export const LAST_SELECTED_SITE_IDS_JSON = JSON.stringify(
+  [21, 13, 6].filter((id) => !EXCLUDED_SITE_IDS.includes(id))
+);
+
+/** 渠道高级设置（setting 字段，JSON 字符串）。含 error_filter_mode:2（对齐示例请求体）。 */
 const CHANNEL_SETTING =
-  '{"proxy":"","concurrency_protection_enabled":false,"max_concurrency":500,"concurrency_protection_threshold":60,"ramp_up_minutes":5,"ramp_recovery_threshold":54,"ramp_reach_threshold":90,"ramp_up_confirm_windows":1,"ramp_down_load_threshold":10,"ramp_down_unhealthy_windows":2}';
+  '{"proxy":"","concurrency_protection_enabled":false,"max_concurrency":500,"concurrency_protection_threshold":60,"error_filter_mode":2,"ramp_up_minutes":5,"ramp_recovery_threshold":54,"ramp_reach_threshold":90,"ramp_up_confirm_windows":1,"ramp_down_load_threshold":10,"ramp_down_unhealthy_windows":2}';
 
 /**
  * channel_json 内部对象的固定字段模板（不含 name / key）。
@@ -69,7 +93,7 @@ export const CHANNEL_JSON_TEMPLATE: Record<string, unknown> = {
   weight: 1,
   tag: "",
   multi_key_mode: "random",
-  settings: '{"allow_service_tier":false}',
+  settings: '{"allow_service_tier":false,"allow_claude_fallbacks":true}',
   group: FIXED_GROUP,
   status: 1,
   setting: CHANNEL_SETTING,
@@ -90,6 +114,16 @@ export const CHANNEL_JSON_TEMPLATE: Record<string, unknown> = {
   ramp_recovery_threshold: 54,
   ramp_up_confirm_windows: 1,
 };
+
+/** 序号补零到 4 位（0001、0002…），供渠道名后缀用。 */
+export function pad4(n: number): string {
+  return String(Math.max(0, Math.floor(n))).padStart(4, "0");
+}
+
+/** 由前缀 + 序号拼渠道名：`${prefix}-0001`。 */
+export function buildChannelName(prefix: string, suffix: number): string {
+  return `${prefix.trim()}-${pad4(suffix)}`;
+}
 
 /** 把多行/含空白的 key 文本解析为去重、去空的有序数组 */
 export function parseKeys(raw: string): string[] {

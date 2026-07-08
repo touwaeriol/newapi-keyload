@@ -25,6 +25,9 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/** 单次 naci 请求超时（毫秒）。必须远小于引擎 CLAIM_STALE_MINUTES(10min) 以封死重复上传窗口。 */
+const NACI_TIMEOUT_MS = 60_000;
+
 interface NaciEnvelope<T> {
   success: boolean;
   message: string;
@@ -148,15 +151,32 @@ async function naciFetch<T>(
   const cookie = await ensureSession();
   const url = `${baseUrl}${pathAndQuery}`;
 
-  const res = await fetch(url, {
-    method,
-    headers: {
-      Cookie: `session=${cookie}`,
-      "Content-Type": "application/json",
-    },
-    body: body ? JSON.stringify(body) : undefined,
-    cache: "no-store",
-  });
+  // 显式超时（远小于引擎 reclaimStaleClaimed 的 10 分钟阈值）：避免单次请求长时间阻塞，
+  // 否则「认领 key 后请求悬挂 > 10 分钟 → key 被回收重建 → 原请求随后又标记上传」会造成重复上传。
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), NACI_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method,
+      headers: {
+        Cookie: `session=${cookie}`,
+        "Content-Type": "application/json",
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      cache: "no-store",
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(
+        `naci 请求超时（${Math.round(NACI_TIMEOUT_MS / 1000)}s）：${method} ${pathAndQuery}`
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 
   let json: NaciEnvelope<T> | null = null;
   let parseErr = false;
@@ -237,23 +257,6 @@ export async function listChannels(
   return { items: arr.map(normalizeChannel), pageSize };
 }
 
-/** 按名称精确查找渠道（翻页扫描），找不到返回 null。 */
-export async function findChannelByName(
-  name: string
-): Promise<NaciChannel | null> {
-  const target = name.trim();
-  if (!target) return null;
-  const pageSize = 100;
-  // 最多扫 50 页，防御性上限
-  for (let page = 1; page <= 50; page++) {
-    const { items } = await listChannels(page, pageSize);
-    const hit = items.find((c) => c.name === target);
-    if (hit) return hit;
-    if (items.length < pageSize) break; // 最后一页
-  }
-  return null;
-}
-
 /** 详情。 */
 export async function getChannel(id: number): Promise<NaciChannel> {
   const env = await naciFetch<AdminHubRawChannel>(
@@ -263,16 +266,47 @@ export async function getChannel(id: number): Promise<NaciChannel> {
   return normalizeChannel(env.data);
 }
 
-// —— 创建 / 更新 ——
+// —— 创建 ——
+
+/** naci 创建渠道响应里单个站点的发布结果（publish_results 元素归一化）。 */
+export interface PublishResult {
+  site_id: number;
+  remote_channel_id: number;
+  remote_channel_name: string;
+  status: string;
+  success: boolean;
+}
+
+/** 从创建响应的 publish_results（数组，字段有 snake/camel 两种拼写）解析每站远程渠道 id。 */
+function parsePublishResults(raw: unknown): PublishResult[] {
+  if (!Array.isArray(raw)) return [];
+  const out: PublishResult[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const r = item as Record<string, unknown>;
+    const siteId = Number(r.site_id ?? r.siteId);
+    if (!Number.isFinite(siteId)) continue;
+    const remoteId = Number(r.remote_channel_id ?? r.remoteChannelId);
+    out.push({
+      site_id: siteId,
+      remote_channel_id: Number.isFinite(remoteId) ? remoteId : 0,
+      remote_channel_name:
+        typeof r.remote_channel_name === "string" ? r.remote_channel_name : "",
+      status: typeof r.status === "string" ? r.status : "",
+      success: Boolean(r.success),
+    });
+  }
+  return out;
+}
 
 /**
  * 创建聚合渠道。channel_json = 供应商模板 + name + key；顶层携带站点发布配置。
- * 返回归一化后的渠道（含 id、publish_results 原样保留在 raw 字段上）。
+ * 返回归一化后的渠道，并显式带上解析后的 publishResults（各站 remote_channel_id）。
  */
 export async function createChannel(params: {
   name: string;
   keyText: string; // 已用 \n 连接的多 key
-}): Promise<NaciChannel> {
+}): Promise<NaciChannel & { publishResults: PublishResult[] }> {
   const channelObj: Record<string, unknown> = {
     ...CHANNEL_JSON_TEMPLATE,
     name: params.name,
@@ -292,44 +326,11 @@ export async function createChannel(params: {
     "/api/admin-hub/channels/",
     body
   );
-  return normalizeChannel(env.data);
-}
-
-/**
- * 更新渠道（追加 key）：先 GET 详情取现有 channel_json，仅把 key 设为本次内容、
- * key_mode=append，其余字段与 site_group_overrides / last_selected_site_ids_json 原样保留，
- * 避免用固定模板整体覆盖平台上已被修改的配置。
- */
-export async function updateChannel(params: {
-  id: number;
-  name: string;
-  keyText: string;
-}): Promise<NaciChannel> {
-  const detail = await getChannel(params.id);
-
-  const channelObj: Record<string, unknown> = {
-    ...(detail.channelJsonObj ?? {}),
-    name: params.name,
-    key: params.keyText,
-    key_mode: "append",
-  };
-
-  const body: Record<string, unknown> = {
-    id: params.id,
-    name: params.name,
-    description: (detail.description as string) ?? "",
-    channel_json: JSON.stringify(channelObj),
-    last_selected_site_ids_json:
-      detail.lastSelectedSiteIdsJson ?? LAST_SELECTED_SITE_IDS_JSON,
-    site_group_overrides: detail.siteGroupOverrides ?? SITE_GROUP_OVERRIDES,
-    owner_user_id: detail.ownerUserId ?? OWNER_USER_ID,
-  };
-  const env = await naciFetch<AdminHubRawChannel>(
-    "PUT",
-    `/api/admin-hub/channels/${params.id}`,
-    body
+  const channel = normalizeChannel(env.data);
+  const publishResults = parsePublishResults(
+    (env.data as { publish_results?: unknown }).publish_results
   );
-  return normalizeChannel(env.data);
+  return { ...channel, publishResults };
 }
 
 // —— 站点状态 / key 统计 ——
@@ -409,8 +410,9 @@ interface ParsedStatusBatch {
 function parseStatusBatch(data: unknown, id: number): ParsedStatusBatch | null {
   if (!data || typeof data !== "object") return null;
   const map = data as Record<string, unknown>;
-  // 按渠道 id 取；取不到则退回第一个条目（防御性）
-  const entry = map[String(id)] ?? Object.values(map)[0];
+  // 严格按渠道 id 取：naci 对某渠道返回显式 null / 缺失时**不得**兜底到别的条目，
+  // 否则会把别的渠道的 key 统计错配给缺失渠道（M-6）。
+  const entry = map[String(id)];
   if (!entry || typeof entry !== "object") return null;
 
   const sites = (entry as { sites?: unknown }).sites;
@@ -568,6 +570,57 @@ export async function getChannelStatusFull(id: number): Promise<{
   };
 }
 
+/**
+ * 一次 status-batch 读取**多个**渠道的每站状态 + key 统计（新模型：一个前缀有多个已建渠道）。
+ * 只对响应里确有该 id 的条目解析（避免 parseStatusBatch 的单 id 兜底把别的条目错配给缺失 id）。
+ * naci 读失败会抛出，由调用方兜底。
+ */
+export async function getChannelsStatusBatch(ids: number[]): Promise<
+  Map<
+    number,
+    {
+      sites: { site_id: number; status: number }[];
+      multiKeySize: number;
+      aliveCount: number;
+      deadCount: number;
+      hasKeyInfo: boolean;
+    }
+  >
+> {
+  const out = new Map<
+    number,
+    {
+      sites: { site_id: number; status: number }[];
+      multiKeySize: number;
+      aliveCount: number;
+      deadCount: number;
+      hasKeyInfo: boolean;
+    }
+  >();
+  if (ids.length === 0) return out;
+  const env = await naciFetch<Record<string, unknown>>(
+    "POST",
+    "/api/admin-hub/channels/status-batch",
+    { ids }
+  );
+  const data = (env.data ?? {}) as Record<string, unknown>;
+  for (const id of ids) {
+    if (!(String(id) in data)) continue;
+    const parsed = parseStatusBatch(data, id);
+    if (!parsed) continue;
+    out.set(id, {
+      sites: Array.from(parsed.siteStatus.entries()).map(
+        ([site_id, status]) => ({ site_id, status })
+      ),
+      multiKeySize: parsed.multiKeySize,
+      aliveCount: parsed.aliveCount,
+      deadCount: parsed.deadCount,
+      hasKeyInfo: parsed.hasKeyInfo,
+    });
+  }
+  return out;
+}
+
 /** naci 额度换算美元的除数（new-api quota_per_unit，实测 400176361→$800.35）。 */
 export const QUOTA_PER_USD = 500000;
 
@@ -580,27 +633,13 @@ export interface SiteUsedQuota {
   used_amount: number;
 }
 
-/**
- * 读取聚合渠道的各站点用量与总用量（渠道详情不含此数据，需单独调用）：
- * POST /api/admin-hub/channels/used-quota {ids:[id]}
- * → data[id] = { sites:[{remote_channel_id,site_id,site_name,used_quota}], used_quota:总额 }。
- * used_amount 由 used_quota / QUOTA_PER_USD 换算为美元。读失败/无数据返回 null。
- */
-export async function getChannelUsedQuota(id: number): Promise<{
+/** 解析 used-quota 响应里单个渠道条目 { sites:[...], used_quota } → 归一化用量。无效返回 null。 */
+function parseUsedQuotaEntry(entry: unknown): {
   usedQuota: number;
   usedAmount: number;
   sites: SiteUsedQuota[];
-} | null> {
-  const env = await naciFetch<Record<string, unknown>>(
-    "POST",
-    "/api/admin-hub/channels/used-quota",
-    { ids: [id] }
-  );
-  const data = env.data;
-  if (!data || typeof data !== "object") return null;
-  const entry = (data as Record<string, unknown>)[String(id)];
+} | null {
   if (!entry || typeof entry !== "object") return null;
-
   const e = entry as { sites?: unknown; used_quota?: unknown };
   const rawSites = Array.isArray(e.sites) ? e.sites : [];
   const sites: SiteUsedQuota[] = rawSites
@@ -615,13 +654,30 @@ export async function getChannelUsedQuota(id: number): Promise<{
         used_amount: usedQuota / QUOTA_PER_USD,
       };
     });
-
   const totalQuota = Number(e.used_quota) || 0;
-  return {
-    usedQuota: totalQuota,
-    usedAmount: totalQuota / QUOTA_PER_USD,
-    sites,
-  };
+  return { usedQuota: totalQuota, usedAmount: totalQuota / QUOTA_PER_USD, sites };
+}
+
+/** 一次 used-quota 读取**多个**渠道的用量（供已建渠道列表聚合）。读失败抛出。 */
+export async function getChannelsUsedQuota(ids: number[]): Promise<
+  Map<number, { usedQuota: number; usedAmount: number; sites: SiteUsedQuota[] }>
+> {
+  const out = new Map<
+    number,
+    { usedQuota: number; usedAmount: number; sites: SiteUsedQuota[] }
+  >();
+  if (ids.length === 0) return out;
+  const env = await naciFetch<Record<string, unknown>>(
+    "POST",
+    "/api/admin-hub/channels/used-quota",
+    { ids }
+  );
+  const data = (env.data ?? {}) as Record<string, unknown>;
+  for (const id of ids) {
+    const parsed = parseUsedQuotaEntry(data[String(id)]);
+    if (parsed) out.set(id, parsed);
+  }
+  return out;
 }
 
 /**

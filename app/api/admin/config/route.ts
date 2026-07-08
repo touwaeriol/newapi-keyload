@@ -18,6 +18,7 @@ export async function GET(req: NextRequest) {
       hasNaciToken: Boolean(cfg.naciToken),
       uploadBatchSize: cfg.uploadBatchSize,
       autoRefillEnabled: cfg.autoRefillEnabled,
+      refillIntervalMinutes: cfg.refillIntervalMinutes,
     });
   } catch (err) {
     return errorResponse(err);
@@ -36,6 +37,7 @@ export async function PUT(req: NextRequest) {
       naciToken?: string;
       uploadBatchSize?: number;
       autoRefillEnabled?: boolean;
+      refillIntervalMinutes?: number;
     };
     const naciBaseUrl = (body.naciBaseUrl ?? "").trim();
     if (!naciBaseUrl) return fail("naciBaseUrl 不能为空");
@@ -59,6 +61,11 @@ export async function PUT(req: NextRequest) {
       typeof body.autoRefillEnabled === "boolean"
         ? body.autoRefillEnabled
         : current.autoRefillEnabled;
+    // 未传则保留原值；间隔由 store.saveConfig 内部钳制到 1~1440 分钟
+    const refillIntervalMinutes =
+      body.refillIntervalMinutes == null
+        ? current.refillIntervalMinutes
+        : body.refillIntervalMinutes;
 
     await saveConfig({
       naciBaseUrl,
@@ -67,6 +74,7 @@ export async function PUT(req: NextRequest) {
       naciToken,
       uploadBatchSize,
       autoRefillEnabled,
+      refillIntervalMinutes,
     });
     // 回读钳制后的最终值返回
     const saved = await getConfig();
@@ -77,6 +85,7 @@ export async function PUT(req: NextRequest) {
       hasNaciToken: Boolean(naciToken),
       uploadBatchSize: saved.uploadBatchSize,
       autoRefillEnabled: saved.autoRefillEnabled,
+      refillIntervalMinutes: saved.refillIntervalMinutes,
     });
   } catch (err) {
     return errorResponse(err);
