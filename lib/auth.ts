@@ -55,12 +55,12 @@ export function errorResponse(err: unknown): NextResponse {
       { status: err.status }
     );
   }
-  // 未预期错误：细节只记服务端日志，响应统一文案，避免泄露内部信息。
+  // 未预期错误：记服务端日志，并把可读消息透传给前端（多为 naci 平台返回的业务错误，
+  // 如「今日渠道创建数量已达上限 200 个」），便于用户直接看懂原因。非 Error 才用兜底文案。
   console.error("[api] 未处理错误:", err);
-  return NextResponse.json(
-    { success: false, message: "服务器内部错误" },
-    { status: 500 }
-  );
+  const message =
+    err instanceof Error && err.message ? err.message : "服务器内部错误";
+  return NextResponse.json({ success: false, message }, { status: 500 });
 }
 
 export function ok(data: unknown = {}) {
