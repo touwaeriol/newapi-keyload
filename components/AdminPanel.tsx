@@ -485,8 +485,8 @@ function ConfigCard() {
                 />
               </Field>
               <Field
-                label="优先级降级间隔（分钟）"
-                hint="全局定时任务每 N 分钟扫描退化渠道并降到优先级5，腾出配额，1~1440"
+                label="优先级对账间隔（分钟）"
+                hint="每 N 分钟对账本地优先级与 naci 实际值（修正静默降级漂移），1~1440。退化降级检测已固定 30 秒一次。"
               >
                 <TextInput
                   type="number"

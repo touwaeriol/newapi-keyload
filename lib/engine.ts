@@ -30,8 +30,12 @@ const DEFAULT_INTERVAL_MS = 60_000;
 const INITIAL_DELAY_MS = 5_000;
 /** 优先级降级全局任务默认间隔（ms）——首轮读到配置前的兜底，与 store seed(5 分钟)一致。 */
 const DEFAULT_PRIORITY_INTERVAL_MS = 5 * 60_000;
-/** 优先级降级任务首次延迟（ms）：错开补给引擎首轮，避开建渠道与降级同时抢 naci。 */
+/** 优先级对账任务首次延迟（ms）：错开补给引擎首轮，避开建渠道与对账同时抢 naci。 */
 const PRIORITY_INITIAL_DELAY_MS = 20_000;
+/** 退化降级快循环间隔（ms）：固定 30 秒一次，仅 1 个 status-batch 请求，开销小。 */
+const DEMOTE_FAST_INTERVAL_MS = 30_000;
+/** 退化降级快循环首次延迟（ms）：错开补给(5s)与对账(20s)首轮。 */
+const DEMOTE_INITIAL_DELAY_MS = 30_000;
 /** claimed 死行回收阈值（分钟）：超过则视为进程崩溃残留，退回 pending 重试。 */
 const CLAIM_STALE_MINUTES = 10;
 
@@ -50,11 +54,15 @@ interface EngineState {
   nextTickAt: number | null; // 预计下次调度时间戳(ms)
   intervalMs: number; // 当前生效的补给间隔(ms)，每轮 tick 从配置刷新
   lastResults: Record<string, LastCheckResult>; // 按前缀记录最近一次检查结果
-  // —— 优先级降级全局任务（独立自调度定时器，间隔由 priorityTaskIntervalMinutes 配置） ——
-  priorityRunning: boolean; // 防重入
+  // —— 优先级对账全局任务（独立自调度定时器，间隔由 priorityTaskIntervalMinutes 配置） ——
+  priorityRunning: boolean; // 防重入（对账）
   priorityTimer: ReturnType<typeof setTimeout> | null;
-  priorityIntervalMs: number; // 当前生效的降级任务间隔(ms)
-  lastPriorityRunAt: number | null; // 上次降级任务完成时间戳(ms)
+  priorityIntervalMs: number; // 当前生效的对账任务间隔(ms)
+  lastPriorityRunAt: number | null; // 上次对账任务完成时间戳(ms)
+  // —— 退化降级快循环（固定 30s，独立定时器） ——
+  demoteRunning: boolean; // 防重入（降级）
+  demoteTimer: ReturnType<typeof setTimeout> | null;
+  lastDemoteRunAt: number | null; // 上次降级任务完成时间戳(ms)
 }
 
 function engineState(): EngineState {
@@ -72,6 +80,9 @@ function engineState(): EngineState {
       priorityTimer: null,
       priorityIntervalMs: DEFAULT_PRIORITY_INTERVAL_MS,
       lastPriorityRunAt: null,
+      demoteRunning: false,
+      demoteTimer: null,
+      lastDemoteRunAt: null,
     };
   } else {
     if (!g.__keyloadEngine.lastResults) g.__keyloadEngine.lastResults = {};
@@ -401,10 +412,11 @@ async function runAndReschedule(): Promise<void> {
 }
 
 /**
- * 全局优先级降级任务：一次扫描所有前缀的退化渠道并从 6 降到 5（腾出优先级配额）。
+ * 优先级对账任务（慢循环，分钟级）：把本地「假6」同步为 naci 真实优先级
+ * （naci 静默降级会留下漂移，卡死配额）。对账后本地计数准确，退化降级(快循环)只处理真正还在优先级6的渠道。
  * 独立于补给引擎，间隔由 priorityTaskIntervalMinutes 配置；priorityRunning 防重入。
  */
-async function runPriorityTask(): Promise<void> {
+async function runReconcileTask(): Promise<void> {
   const state = engineState();
   if (state.priorityRunning) return;
   state.priorityRunning = true;
@@ -412,24 +424,40 @@ async function runPriorityTask(): Promise<void> {
     const cfg = await getConfig();
     state.priorityIntervalMs =
       clampPriorityTaskIntervalMinutes(cfg.priorityTaskIntervalMinutes) * 60_000;
-    // 先对账：把本地「假6」同步为 naci 真实优先级（naci 静默降级会留下漂移，卡死配额）。
-    // 对账后本地计数准确，退化降级只处理真正还在优先级6的渠道。
     const reconciled = await reconcileTrackedPriorities();
     if (reconciled > 0) {
       await safeLog(
         "info",
         undefined,
-        `优先级任务：对账修正 ${reconciled} 个渠道的本地优先级（同步 naci 实际值，释放被假6占用的配额）`
+        `优先级对账：修正 ${reconciled} 个渠道的本地优先级（同步 naci 实际值，释放被假6占用的配额）`
       );
     }
+  } catch (err) {
+    console.error("[engine] 优先级对账任务失败:", err);
+  } finally {
+    state.priorityRunning = false;
+    state.lastPriorityRunAt = Date.now();
+  }
+}
+
+/**
+ * 退化降级快循环（固定 30s）：直接用一次 status-batch 读「本地记为高优先级(>5)」的渠道状态，
+ * 任一站点被禁用即降到 5，腾出稀缺的优先级配额。仅高优先级模式下降级后立即补建。demoteRunning 防重入。
+ */
+async function runDemoteTask(): Promise<void> {
+  const state = engineState();
+  if (state.demoteRunning) return;
+  state.demoteRunning = true;
+  try {
     const demoted = await demoteAllDegradedChannels();
     if (demoted > 0) {
       await safeLog(
         "info",
         undefined,
-        `优先级任务：本轮降级 ${demoted} 个退化渠道（6→5，腾出优先级配额）`
+        `退化降级：本轮降级 ${demoted} 个退化渠道（6→5，腾出优先级配额）`
       );
       // 仅高优先级模式：刚回收了名额 → 立即把池里等待的 key 补进空出的名额，无需等下一个补给间隔。
+      const cfg = await getConfig();
       if (cfg.onlyHighPriorityEnabled && cfg.autoRefillEnabled) {
         try {
           const built = await distributeHighPriorityRoundRobin();
@@ -437,7 +465,7 @@ async function runPriorityTask(): Promise<void> {
             await safeLog(
               "info",
               undefined,
-              `优先级任务：回收后立即补建 ${built} 个高优先级渠道`
+              `退化降级：回收后立即补建 ${built} 个高优先级渠道`
             );
           }
         } catch (err) {
@@ -446,18 +474,18 @@ async function runPriorityTask(): Promise<void> {
       }
     }
   } catch (err) {
-    console.error("[engine] 优先级降级任务失败:", err);
+    console.error("[engine] 退化降级任务失败:", err);
   } finally {
-    state.priorityRunning = false;
-    state.lastPriorityRunAt = Date.now();
+    state.demoteRunning = false;
+    state.lastDemoteRunAt = Date.now();
   }
 }
 
-/** 跑一次优先级降级任务并按当前生效间隔安排下一次（自调度 setTimeout 链）。 */
-async function runPriorityAndReschedule(): Promise<void> {
+/** 跑一次优先级对账并按当前生效间隔安排下一次（自调度 setTimeout 链）。 */
+async function runReconcileAndReschedule(): Promise<void> {
   const state = engineState();
   try {
-    await runPriorityTask();
+    await runReconcileTask();
   } finally {
     const delay =
       state.priorityIntervalMs > 0
@@ -465,8 +493,21 @@ async function runPriorityAndReschedule(): Promise<void> {
         : DEFAULT_PRIORITY_INTERVAL_MS;
     if (state.priorityTimer) clearTimeout(state.priorityTimer);
     state.priorityTimer = setTimeout(() => {
-      void runPriorityAndReschedule();
+      void runReconcileAndReschedule();
     }, delay);
+  }
+}
+
+/** 跑一次退化降级并固定 30s 后再跑（自调度 setTimeout 链）。 */
+async function runDemoteAndReschedule(): Promise<void> {
+  const state = engineState();
+  try {
+    await runDemoteTask();
+  } finally {
+    if (state.demoteTimer) clearTimeout(state.demoteTimer);
+    state.demoteTimer = setTimeout(() => {
+      void runDemoteAndReschedule();
+    }, DEMOTE_FAST_INTERVAL_MS);
   }
 }
 
@@ -481,12 +522,17 @@ export function startEngine(): void {
     void runAndReschedule();
   }, INITIAL_DELAY_MS);
 
-  // 全局优先级降级任务（独立定时器，错开补给首轮）
+  // 优先级对账任务（慢循环，分钟级；独立定时器，错开补给首轮）
   state.priorityTimer = setTimeout(() => {
-    void runPriorityAndReschedule();
+    void runReconcileAndReschedule();
   }, PRIORITY_INITIAL_DELAY_MS);
 
+  // 退化降级快循环（固定 30s；独立定时器，错开补给与对账首轮）
+  state.demoteTimer = setTimeout(() => {
+    void runDemoteAndReschedule();
+  }, DEMOTE_INITIAL_DELAY_MS);
+
   console.log(
-    "[engine] 定时建渠道引擎 + 全局优先级降级任务已启动（间隔均按系统配置，可在后台调整）"
+    "[engine] 定时建渠道引擎 + 优先级对账(分钟级) + 退化降级(30s) 已启动"
   );
 }

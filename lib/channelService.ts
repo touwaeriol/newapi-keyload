@@ -15,7 +15,6 @@ import {
   setSiteStatus,
 } from "./naci";
 import {
-  DEMOTE_TRIGGER_SITE_IDS,
   DEMOTED_PRIORITY,
   FIXED_PRIORITY,
   parseKeys,
@@ -865,7 +864,7 @@ async function getPrefixRealtimeCached(user: User): Promise<PrefixRealtime> {
  *
  * 退化判定（满足其一即降级）：
  * 1) 渠道级自动禁用：有 key 但可用为 0（naci 列表显示「自动禁用 0/N」）；
- * 2) 站点级退化：DEMOTE_TRIGGER_SITE_IDS（AC/61，忽略结构性未打开的 AGT）任一为禁用(2)/自动禁用(3)。
+ * 2) 站点级退化：**任意一个站点**为禁用(2)/自动禁用(3)（含 AGT —— 运营要求「任一站掉即降级」）。
  */
 export async function demoteAllDegradedChannels(): Promise<number> {
   const cfg = await getConfig();
@@ -900,13 +899,14 @@ export async function demoteAllDegradedChannels(): Promise<number> {
   for (const c of candidates) {
     const st = statusMap.get(c.channelId as number);
     if (!st) continue;
-    const siteStatus = new Map(st.sites.map((s) => [s.site_id, s.status]));
     const channelExhausted =
       st.hasKeyInfo && st.multiKeySize > 0 && st.aliveCount === 0;
-    const siteDegraded = DEMOTE_TRIGGER_SITE_IDS.some((sid) => {
-      const s = siteStatus.get(sid);
-      return s === 2 || s === 3;
-    });
+    // 运营决策：**任意一个站点**被禁用(2)/自动禁用(3)即视为退化 → 降级。
+    // 不再只看 AC/61；只要有一站掉了就腾出高优先级名额（P6 只留三站全健康的渠道）。
+    const degradedSites = st.sites.filter(
+      (s) => s.status === 2 || s.status === 3
+    );
+    const siteDegraded = degradedSites.length > 0;
     if (!channelExhausted && !siteDegraded) continue;
 
     try {
@@ -921,7 +921,11 @@ export async function demoteAllDegradedChannels(): Promise<number> {
         actor: "engine",
         channelName: c.prefix,
         channelId: c.channelId,
-        message: `渠道 ${c.channelName} 站点退化，优先级 ${c.priority}→${DEMOTED_PRIORITY}（腾出优先级配额）`,
+        message: `渠道 ${c.channelName} 退化（${
+          siteDegraded
+            ? `站点禁用 site=${degradedSites.map((s) => s.site_id).join(",")}`
+            : `key 全禁 ${st.multiKeySize}/${st.multiKeySize}`
+        }），优先级 ${c.priority}→${DEMOTED_PRIORITY}（腾出优先级配额）`,
       });
     } catch (err) {
       await addLog({
