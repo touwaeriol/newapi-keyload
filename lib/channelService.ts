@@ -11,6 +11,7 @@ import {
   getChannelSites,
   getChannelsStatusBatch,
   getChannelsUsedQuota,
+  QUOTA_PER_USD,
   setChannelPriority,
   setSiteStatus,
 } from "./naci";
@@ -31,16 +32,20 @@ import {
   createdChannelSitesByChannel,
   deleteCreatedChannel,
   finalizeCreatedChannel,
+  findUserByChannelName,
   getConfig,
   getCreatedChannelByChannelId,
   getUploadedKeyCount,
   listChannelsAbovePriority,
+  listChannelsNeedingUsageRefresh,
   listCreatedChannels,
   markPoolUploaded,
   poolCounts,
+  recordChannelUsage,
   recordCreatedChannelSites,
   recordUploadedKeys,
   releaseClaim,
+  sumChannelUsedQuotaByPrefix,
   updateCreatedChannelPriority,
   updateUserKeyStats,
   updateUserUsedQuota,
@@ -714,7 +719,11 @@ function rtCache(): {
   return g.__keyloadChanRt;
 }
 
-/** 真实拉取某前缀所有已建渠道的实时视图（一次 status-batch + 一次 used-quota 批量取）。 */
+/**
+ * 真实拉取某前缀所有已建渠道的实时视图（一次 status-batch 读站点/key 状态）。
+ * 用量(used_quota) **不再实时拉** naci —— 改读 created_channels 缓存列（由后台用量任务按频率+次数上限刷新，
+ * 避免每次实时视图都对全部渠道拉 used-quota 造成雪崩）。usedAmount = 缓存 used_quota / QUOTA_PER_USD。
+ */
 async function fetchPrefixRealtime(user: User): Promise<PrefixRealtime> {
   const prefix = user.channelName.trim();
   const created = await listCreatedChannels(prefix);
@@ -723,29 +732,17 @@ async function fetchPrefixRealtime(user: User): Promise<PrefixRealtime> {
     .filter((id): id is number => typeof id === "number");
 
   let statusMap: Awaited<ReturnType<typeof getChannelsStatusBatch>> = new Map();
-  let usageMap: Awaited<ReturnType<typeof getChannelsUsedQuota>> = new Map();
-  // 分别记录两路是否**真正成功**：失败(catch)返回空 map，但不得据此把已缓存统计清零(M-1)。
+  // status-batch 是否**真正成功**：失败(catch)返回空 map，但不得据此把已缓存统计清零(M-1)。
   let statusOk = false;
-  let usageOk = false;
   // 各已建渠道的每站远程 id（本地库，publish_results 落库）
   const siteMap = await createdChannelSitesByChannel(created.map((c) => c.id));
   if (ids.length > 0) {
-    const [s, u] = await Promise.all([
-      getChannelsStatusBatch(ids)
-        .then((m) => {
-          statusOk = true;
-          return m;
-        })
-        .catch(() => new Map()),
-      getChannelsUsedQuota(ids)
-        .then((m) => {
-          usageOk = true;
-          return m;
-        })
-        .catch(() => new Map()),
-    ]);
-    statusMap = s;
-    usageMap = u;
+    statusMap = await getChannelsStatusBatch(ids)
+      .then((m) => {
+        statusOk = true;
+        return m;
+      })
+      .catch(() => new Map());
   }
 
   let totalPlatformKey = 0;
@@ -756,14 +753,14 @@ async function fetchPrefixRealtime(user: User): Promise<PrefixRealtime> {
 
   const channels: CreatedChannelView[] = created.map((c) => {
     const st = c.channelId != null ? statusMap.get(c.channelId) : undefined;
-    const us = c.channelId != null ? usageMap.get(c.channelId) : undefined;
 
     const hasKey = !!st && st.hasKeyInfo;
     const platformKeyCount = hasKey ? st!.multiKeySize : null;
     const deadKeyCount = hasKey ? st!.deadCount : null;
     const aliveKeyCount = hasKey ? st!.aliveCount : null;
-    const usedQuota = us?.usedQuota ?? 0;
-    const usedAmount = us?.usedAmount ?? 0;
+    // 用量取缓存列（后台任务刷新）；null=尚未刷新，展示为 0。
+    const usedQuota = c.usedQuota ?? 0;
+    const usedAmount = usedQuota / QUOTA_PER_USD;
 
     if (platformKeyCount != null) totalPlatformKey += platformKeyCount;
     if (deadKeyCount != null) totalDeadKey += deadKeyCount;
@@ -803,7 +800,8 @@ async function fetchPrefixRealtime(user: User): Promise<PrefixRealtime> {
       deadKeyCount: totalDeadKey,
     });
   }
-  if (ids.length > 0 && usageOk) {
+  // 用量聚合来自缓存列（后台任务维护），直接写回用户缓存供管理员列表复用。
+  if (ids.length > 0) {
     await updateUserUsedQuota(user.id, totalUsedQuota);
   }
 
@@ -868,7 +866,7 @@ async function getPrefixRealtimeCached(user: User): Promise<PrefixRealtime> {
  */
 export async function demoteAllDegradedChannels(): Promise<number> {
   const cfg = await getConfig();
-  const graceMs = cfg.demoteGraceMinutes * 60_000;
+  const graceMs = cfg.demoteGraceSeconds * 1000;
   const now = Date.now();
   const all = await listChannelsAbovePriority(DEMOTED_PRIORITY);
   const candidates = all.filter(
@@ -1041,6 +1039,79 @@ export function invalidateChannelCache(prefix: string): void {
   c.data.delete(key);
   // 同时清在途 fetch，否则并发合并会用失效前的旧结果回填缓存（M-3）。
   c.inflight.delete(key);
+}
+
+/** 单次用量刷新最多处理的渠道数（分摊到多轮，避免首轮把全部渠道一次刷完）。 */
+const USAGE_REFRESH_BATCH_LIMIT = 300;
+/** used-quota 单请求 id 分块大小（避免单请求过大 + 降低 naci 429）。 */
+const USAGE_QUOTA_CHUNK = 40;
+/** 分块之间的节流（ms）。 */
+const USAGE_CHUNK_DELAY_MS = 300;
+
+/**
+ * 后台用量刷新任务：挑「刷新次数 < usageMaxUpdates」的已建渠道，分块批量拉 used-quota，
+ * 写回 created_channels.used_quota 缓存并计数 +1；某渠道刷够上限即冻结、不再拉，避免雪崩。
+ * 刷新后重算受影响前缀的用户用量聚合缓存（users.used_quota = 该前缀各渠道缓存 used_quota 之和）。
+ * 返回本轮成功刷新的渠道数。异常自行捕获、不外抛。
+ */
+export async function refreshChannelUsage(): Promise<number> {
+  const cfg = await getConfig();
+  if (cfg.usageMaxUpdates <= 0) return 0; // 0=关闭用量刷新
+  const targets = await listChannelsNeedingUsageRefresh(
+    cfg.usageMaxUpdates,
+    USAGE_REFRESH_BATCH_LIMIT
+  );
+  if (targets.length === 0) return 0;
+
+  const idToPrefix = new Map<number, string>();
+  for (const c of targets) idToPrefix.set(c.channelId as number, c.prefix);
+  const ids = targets.map((c) => c.channelId as number);
+  const affectedPrefixes = new Set<string>();
+  let updated = 0;
+
+  for (let i = 0; i < ids.length; i += USAGE_QUOTA_CHUNK) {
+    const chunk = ids.slice(i, i + USAGE_QUOTA_CHUNK);
+    let usageMap: Awaited<ReturnType<typeof getChannelsUsedQuota>>;
+    try {
+      usageMap = await getChannelsUsedQuota(chunk);
+    } catch (err) {
+      // 本块失败（常见 naci 429）→ 保留旧值、不计数，下轮再试。
+      await addLog({
+        level: "warn",
+        actor: "engine",
+        message: `用量刷新：读取 ${chunk.length} 个渠道 used-quota 失败，本块跳过：${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      });
+      continue;
+    }
+    for (const id of chunk) {
+      const us = usageMap.get(id);
+      if (!us) continue; // 读不到该渠道 → 不写、不计数，下轮再试
+      await recordChannelUsage(id, us.usedQuota);
+      const p = idToPrefix.get(id);
+      if (p) affectedPrefixes.add(p);
+      updated += 1;
+    }
+    if (i + USAGE_QUOTA_CHUNK < ids.length) {
+      await new Promise((r) => setTimeout(r, USAGE_CHUNK_DELAY_MS));
+    }
+  }
+
+  // 重算受影响前缀的用户用量聚合缓存，并失效实时视图缓存。
+  for (const p of affectedPrefixes) {
+    try {
+      const u = await findUserByChannelName(p);
+      if (u) {
+        const sum = await sumChannelUsedQuotaByPrefix(p);
+        await updateUserUsedQuota(u.id, sum);
+      }
+      invalidateChannelCache(p);
+    } catch {
+      // 单前缀聚合失败不影响整体
+    }
+  }
+  return updated;
 }
 
 /**

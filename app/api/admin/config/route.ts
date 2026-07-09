@@ -23,7 +23,10 @@ export async function GET(req: NextRequest) {
       refillIntervalMinutes: cfg.refillIntervalMinutes,
       priority6Limit: cfg.priority6Limit,
       priorityTaskIntervalMinutes: cfg.priorityTaskIntervalMinutes,
-      demoteGraceMinutes: cfg.demoteGraceMinutes,
+      demoteIntervalSeconds: cfg.demoteIntervalSeconds,
+      demoteGraceSeconds: cfg.demoteGraceSeconds,
+      usageRefreshIntervalMinutes: cfg.usageRefreshIntervalMinutes,
+      usageMaxUpdates: cfg.usageMaxUpdates,
       globalUploadLimitCount: cfg.globalUploadLimitCount,
       globalUploadLimitWindowMinutes: cfg.globalUploadLimitWindowMinutes,
       userUploadLimitCount: cfg.userUploadLimitCount,
@@ -53,7 +56,10 @@ export async function PUT(req: NextRequest) {
       refillIntervalMinutes?: number;
       priority6Limit?: number;
       priorityTaskIntervalMinutes?: number;
-      demoteGraceMinutes?: number;
+      demoteIntervalSeconds?: number;
+      demoteGraceSeconds?: number;
+      usageRefreshIntervalMinutes?: number;
+      usageMaxUpdates?: number;
       globalUploadLimitCount?: number;
       globalUploadLimitWindowMinutes?: number;
       userUploadLimitCount?: number;
@@ -108,11 +114,25 @@ export async function PUT(req: NextRequest) {
       body.priorityTaskIntervalMinutes == null
         ? current.priorityTaskIntervalMinutes
         : body.priorityTaskIntervalMinutes;
-    // 未传则保留原值；由 store.saveConfig 内部钳制到 0~1440 分钟
-    const demoteGraceMinutes =
-      body.demoteGraceMinutes == null
-        ? current.demoteGraceMinutes
-        : body.demoteGraceMinutes;
+    // 未传则保留原值；由 store.saveConfig 内部钳制到 5~86400 秒
+    const demoteIntervalSeconds =
+      body.demoteIntervalSeconds == null
+        ? current.demoteIntervalSeconds
+        : body.demoteIntervalSeconds;
+    // 未传则保留原值；由 store.saveConfig 内部钳制到 0~86400 秒
+    const demoteGraceSeconds =
+      body.demoteGraceSeconds == null
+        ? current.demoteGraceSeconds
+        : body.demoteGraceSeconds;
+    // 用量刷新：频率(1~1440 分钟) + 每渠道最多刷新次数(0~100)
+    const usageRefreshIntervalMinutes =
+      body.usageRefreshIntervalMinutes == null
+        ? current.usageRefreshIntervalMinutes
+        : body.usageRefreshIntervalMinutes;
+    const usageMaxUpdates =
+      body.usageMaxUpdates == null
+        ? current.usageMaxUpdates
+        : body.usageMaxUpdates;
     // 上传限速 4 项：未传则保留原值；个数钳制 0~1000000（0=不限速），窗口钳制 1~1440 分钟
     const globalUploadLimitCount =
       body.globalUploadLimitCount == null
@@ -151,7 +171,10 @@ export async function PUT(req: NextRequest) {
       refillIntervalMinutes,
       priority6Limit,
       priorityTaskIntervalMinutes,
-      demoteGraceMinutes,
+      demoteIntervalSeconds,
+      demoteGraceSeconds,
+      usageRefreshIntervalMinutes,
+      usageMaxUpdates,
       globalUploadLimitCount,
       globalUploadLimitWindowMinutes,
       userUploadLimitCount,
@@ -173,7 +196,10 @@ export async function PUT(req: NextRequest) {
       refillIntervalMinutes: saved.refillIntervalMinutes,
       priority6Limit: saved.priority6Limit,
       priorityTaskIntervalMinutes: saved.priorityTaskIntervalMinutes,
-      demoteGraceMinutes: saved.demoteGraceMinutes,
+      demoteIntervalSeconds: saved.demoteIntervalSeconds,
+      demoteGraceSeconds: saved.demoteGraceSeconds,
+      usageRefreshIntervalMinutes: saved.usageRefreshIntervalMinutes,
+      usageMaxUpdates: saved.usageMaxUpdates,
       globalUploadLimitCount: saved.globalUploadLimitCount,
       globalUploadLimitWindowMinutes: saved.globalUploadLimitWindowMinutes,
       userUploadLimitCount: saved.userUploadLimitCount,

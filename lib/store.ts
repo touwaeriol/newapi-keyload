@@ -20,8 +20,11 @@ const SEED_MODELS = DEFAULT_MODELS; // 模型列表默认（管理员可配）
 const SEED_AUTO_REFILL_ENABLED = true;
 const SEED_REFILL_INTERVAL_MINUTES = 1;
 const SEED_PRIORITY6_LIMIT = 6; // 优先级6渠道数量上限（naci 账号配额）
-const SEED_PRIORITY_TASK_INTERVAL_MINUTES = 5; // 优先级降级全局定时任务间隔（分钟）
-const SEED_DEMOTE_GRACE_MINUTES = 5; // 僵尸/退化判定宽限期（分钟）
+const SEED_PRIORITY_TASK_INTERVAL_MINUTES = 5; // 优先级对账全局定时任务间隔（分钟）
+const SEED_DEMOTE_INTERVAL_SECONDS = 30; // 退化降级检测间隔（秒）
+const SEED_DEMOTE_GRACE_SECONDS = 30; // 退化判定宽限期（秒）
+const SEED_USAGE_REFRESH_INTERVAL_MINUTES = 10; // 用量刷新频率（分钟）
+const SEED_USAGE_MAX_UPDATES = 2; // 每渠道最多刷新用量次数（刷够即冻结）
 const SEED_UPLOAD_LIMIT_COUNT = 0; // 上传限速·个数（全局/用户默认共用 seed；0=不限速）
 const SEED_UPLOAD_LIMIT_WINDOW_MINUTES = 10; // 上传限速窗口（分钟，全局/用户默认共用 seed）
 const SEED_USER_MANUAL_UPLOAD_ENABLED = true; // 默认允许用户手动上传
@@ -59,7 +62,7 @@ export function clampPriority6Limit(n: unknown): number {
   return v;
 }
 
-/** 优先级降级任务间隔（分钟）钳制（1~1440，复用补给间隔区间） */
+/** 优先级对账任务间隔（分钟）钳制（1~1440，复用补给间隔区间） */
 export function clampPriorityTaskIntervalMinutes(n: unknown): number {
   const v = Math.floor(Number(n));
   if (!Number.isFinite(v) || v < 1) return SEED_PRIORITY_TASK_INTERVAL_MINUTES;
@@ -67,11 +70,35 @@ export function clampPriorityTaskIntervalMinutes(n: unknown): number {
   return v;
 }
 
-/** 僵尸/退化判定宽限期（分钟）钳制（0~1440；0=建后即可判定） */
-export function clampDemoteGraceMinutes(n: unknown): number {
+/** 退化降级检测间隔（秒）钳制（5~86400；下限 5s 防止打爆 naci） */
+export function clampDemoteIntervalSeconds(n: unknown): number {
   const v = Math.floor(Number(n));
-  if (!Number.isFinite(v) || v < 0) return SEED_DEMOTE_GRACE_MINUTES;
+  if (!Number.isFinite(v) || v < 5) return SEED_DEMOTE_INTERVAL_SECONDS;
+  if (v > 86400) return 86400;
+  return v;
+}
+
+/** 退化判定宽限期（秒）钳制（0~86400；0=建后即可判定） */
+export function clampDemoteGraceSeconds(n: unknown): number {
+  const v = Math.floor(Number(n));
+  if (!Number.isFinite(v) || v < 0) return SEED_DEMOTE_GRACE_SECONDS;
+  if (v > 86400) return 86400;
+  return v;
+}
+
+/** 用量刷新频率（分钟）钳制（1~1440） */
+export function clampUsageRefreshIntervalMinutes(n: unknown): number {
+  const v = Math.floor(Number(n));
+  if (!Number.isFinite(v) || v < 1) return SEED_USAGE_REFRESH_INTERVAL_MINUTES;
   if (v > 1440) return 1440;
+  return v;
+}
+
+/** 每渠道最多刷新用量次数钳制（0~100；0=不刷新用量） */
+export function clampUsageMaxUpdates(n: unknown): number {
+  const v = Math.floor(Number(n));
+  if (!Number.isFinite(v) || v < 0) return SEED_USAGE_MAX_UPDATES;
+  if (v > 100) return 100;
   return v;
 }
 
@@ -200,9 +227,24 @@ async function createTables(pool: Pool): Promise<void> {
   await pool.query(
     `ALTER TABLE config ADD COLUMN IF NOT EXISTS priority_task_interval_minutes int NOT NULL DEFAULT 5`
   );
-  // 僵尸/退化判定宽限期（分钟，默认 5）。
+  // 僵尸/退化判定宽限期（分钟，默认 5）——旧列，保留兼容，已改用秒。
   await pool.query(
     `ALTER TABLE config ADD COLUMN IF NOT EXISTS demote_grace_minutes int NOT NULL DEFAULT 5`
+  );
+  // 退化降级检测间隔（秒，默认 30）。取代原「固定 30s / 分钟级」。
+  await pool.query(
+    `ALTER TABLE config ADD COLUMN IF NOT EXISTS demote_interval_seconds int NOT NULL DEFAULT 30`
+  );
+  // 退化判定宽限期（秒，默认 30）。取代 demote_grace_minutes。
+  await pool.query(
+    `ALTER TABLE config ADD COLUMN IF NOT EXISTS demote_grace_seconds int NOT NULL DEFAULT 30`
+  );
+  // 用量刷新：频率（分钟，默认 10）+ 每渠道最多刷新次数（默认 2，刷够即冻结防雪崩）。
+  await pool.query(
+    `ALTER TABLE config ADD COLUMN IF NOT EXISTS usage_refresh_interval_minutes int NOT NULL DEFAULT 10`
+  );
+  await pool.query(
+    `ALTER TABLE config ADD COLUMN IF NOT EXISTS usage_max_updates int NOT NULL DEFAULT 2`
   );
   // 上传限速：全局 + 用户默认（个数 0=不限速；窗口分钟）。
   await pool.query(
@@ -285,6 +327,16 @@ async function createTables(pool: Pool): Promise<void> {
   // 故已存在行回填 5；新建渠道由 finalizeCreatedChannel 显式写 6。
   await pool.query(
     `ALTER TABLE created_channels ADD COLUMN IF NOT EXISTS priority int NOT NULL DEFAULT 5`
+  );
+  // 每渠道用量缓存 + 刷新计数（后台用量任务：每渠道刷够 usage_max_updates 次即冻结，避免雪崩）。
+  await pool.query(
+    `ALTER TABLE created_channels ADD COLUMN IF NOT EXISTS used_quota bigint`
+  );
+  await pool.query(
+    `ALTER TABLE created_channels ADD COLUMN IF NOT EXISTS usage_update_count int NOT NULL DEFAULT 0`
+  );
+  await pool.query(
+    `ALTER TABLE created_channels ADD COLUMN IF NOT EXISTS usage_updated_at timestamptz`
   );
   // 每个已建渠道在各站点的远程渠道 id / 名称（来自 naci 创建响应 publish_results）。
   // created_channel_id 引用 created_channels.id；渠道占位行删除时级联清理。
@@ -537,6 +589,10 @@ export async function getConfig(): Promise<SystemConfig> {
     priority6_limit: number;
     priority_task_interval_minutes: number;
     demote_grace_minutes: number;
+    demote_interval_seconds: number;
+    demote_grace_seconds: number;
+    usage_refresh_interval_minutes: number;
+    usage_max_updates: number;
     global_upload_limit_count: number;
     global_upload_limit_window_minutes: number;
     user_upload_limit_count: number;
@@ -544,7 +600,7 @@ export async function getConfig(): Promise<SystemConfig> {
     user_manual_upload_enabled: boolean;
     only_high_priority_enabled: boolean;
   }>(
-    "SELECT naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, priority_task_interval_minutes, demote_grace_minutes, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes, user_manual_upload_enabled, only_high_priority_enabled FROM config WHERE id = 1"
+    "SELECT naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, priority_task_interval_minutes, demote_grace_minutes, demote_interval_seconds, demote_grace_seconds, usage_refresh_interval_minutes, usage_max_updates, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes, user_manual_upload_enabled, only_high_priority_enabled FROM config WHERE id = 1"
   );
   if (!rows[0]) {
     return {
@@ -559,7 +615,10 @@ export async function getConfig(): Promise<SystemConfig> {
       refillIntervalMinutes: SEED_REFILL_INTERVAL_MINUTES,
       priority6Limit: SEED_PRIORITY6_LIMIT,
       priorityTaskIntervalMinutes: SEED_PRIORITY_TASK_INTERVAL_MINUTES,
-      demoteGraceMinutes: SEED_DEMOTE_GRACE_MINUTES,
+      demoteIntervalSeconds: SEED_DEMOTE_INTERVAL_SECONDS,
+      demoteGraceSeconds: SEED_DEMOTE_GRACE_SECONDS,
+      usageRefreshIntervalMinutes: SEED_USAGE_REFRESH_INTERVAL_MINUTES,
+      usageMaxUpdates: SEED_USAGE_MAX_UPDATES,
       globalUploadLimitCount: SEED_UPLOAD_LIMIT_COUNT,
       globalUploadLimitWindowMinutes: SEED_UPLOAD_LIMIT_WINDOW_MINUTES,
       userUploadLimitCount: SEED_UPLOAD_LIMIT_COUNT,
@@ -582,7 +641,14 @@ export async function getConfig(): Promise<SystemConfig> {
     priorityTaskIntervalMinutes: clampPriorityTaskIntervalMinutes(
       rows[0].priority_task_interval_minutes
     ),
-    demoteGraceMinutes: clampDemoteGraceMinutes(rows[0].demote_grace_minutes),
+    demoteIntervalSeconds: clampDemoteIntervalSeconds(
+      rows[0].demote_interval_seconds
+    ),
+    demoteGraceSeconds: clampDemoteGraceSeconds(rows[0].demote_grace_seconds),
+    usageRefreshIntervalMinutes: clampUsageRefreshIntervalMinutes(
+      rows[0].usage_refresh_interval_minutes
+    ),
+    usageMaxUpdates: clampUsageMaxUpdates(rows[0].usage_max_updates),
     globalUploadLimitCount: clampUploadLimitCount(
       rows[0].global_upload_limit_count
     ),
@@ -602,8 +668,8 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
   const pool = await ensureReady();
   const models = (cfg.models ?? "").trim() || SEED_MODELS;
   await pool.query(
-    `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, priority_task_interval_minutes, demote_grace_minutes, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes, user_manual_upload_enabled, only_high_priority_enabled)
-     VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+    `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, priority_task_interval_minutes, demote_interval_seconds, demote_grace_seconds, usage_refresh_interval_minutes, usage_max_updates, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes, user_manual_upload_enabled, only_high_priority_enabled)
+     VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
      ON CONFLICT (id) DO UPDATE SET
        naci_base_url = EXCLUDED.naci_base_url,
        naci_token = EXCLUDED.naci_token,
@@ -616,7 +682,10 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
        refill_interval_minutes = EXCLUDED.refill_interval_minutes,
        priority6_limit = EXCLUDED.priority6_limit,
        priority_task_interval_minutes = EXCLUDED.priority_task_interval_minutes,
-       demote_grace_minutes = EXCLUDED.demote_grace_minutes,
+       demote_interval_seconds = EXCLUDED.demote_interval_seconds,
+       demote_grace_seconds = EXCLUDED.demote_grace_seconds,
+       usage_refresh_interval_minutes = EXCLUDED.usage_refresh_interval_minutes,
+       usage_max_updates = EXCLUDED.usage_max_updates,
        global_upload_limit_count = EXCLUDED.global_upload_limit_count,
        global_upload_limit_window_minutes = EXCLUDED.global_upload_limit_window_minutes,
        user_upload_limit_count = EXCLUDED.user_upload_limit_count,
@@ -635,7 +704,10 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
       clampIntervalMinutes(cfg.refillIntervalMinutes),
       clampPriority6Limit(cfg.priority6Limit),
       clampPriorityTaskIntervalMinutes(cfg.priorityTaskIntervalMinutes),
-      clampDemoteGraceMinutes(cfg.demoteGraceMinutes),
+      clampDemoteIntervalSeconds(cfg.demoteIntervalSeconds),
+      clampDemoteGraceSeconds(cfg.demoteGraceSeconds),
+      clampUsageRefreshIntervalMinutes(cfg.usageRefreshIntervalMinutes),
+      clampUsageMaxUpdates(cfg.usageMaxUpdates),
       clampUploadLimitCount(cfg.globalUploadLimitCount),
       clampUploadLimitWindowMinutes(cfg.globalUploadLimitWindowMinutes),
       clampUploadLimitCount(cfg.userUploadLimitCount),
@@ -918,6 +990,10 @@ export interface CreatedChannel {
   keyCount: number;
   /** 本系统记录的当前优先级（6=新建，5=退化后降级）。 */
   priority: number;
+  /** 缓存的该渠道 naci used_quota（后台用量任务写入；null=尚未拉取）。 */
+  usedQuota: number | null;
+  /** 已刷新用量的次数（刷够 usage_max_updates 即冻结不再拉）。 */
+  usageUpdateCount: number;
   createdAt: string;
 }
 
@@ -929,6 +1005,8 @@ interface CreatedChannelRow {
   channel_id: number | null;
   key_count: number;
   priority: number;
+  used_quota: string | number | null;
+  usage_update_count: number | null;
   created_at: Date | string;
 }
 
@@ -941,6 +1019,8 @@ function rowToCreatedChannel(r: CreatedChannelRow): CreatedChannel {
     channelId: r.channel_id === null ? null : Number(r.channel_id),
     keyCount: Number(r.key_count),
     priority: Number(r.priority),
+    usedQuota: r.used_quota == null ? null : Number(r.used_quota),
+    usageUpdateCount: Number(r.usage_update_count ?? 0),
     createdAt: toIso(r.created_at),
   };
 }
@@ -1026,6 +1106,52 @@ export async function getCreatedChannelByChannelId(
 export async function deleteCreatedChannel(id: string): Promise<void> {
   const pool = await ensureReady();
   await pool.query(`DELETE FROM created_channels WHERE id = $1`, [id]);
+}
+
+/**
+ * 取需要刷新用量的已建渠道：channel_id 非空且刷新次数 < maxUpdates，
+ * 最久未刷新的优先（NULLS FIRST=从未刷新的先来）。刷够即冻结，避免雪崩。
+ */
+export async function listChannelsNeedingUsageRefresh(
+  maxUpdates: number,
+  limit: number
+): Promise<CreatedChannel[]> {
+  const pool = await ensureReady();
+  const { rows } = await pool.query<CreatedChannelRow>(
+    `SELECT * FROM created_channels
+      WHERE channel_id IS NOT NULL AND usage_update_count < $1
+      ORDER BY usage_updated_at ASC NULLS FIRST, created_at ASC
+      LIMIT $2`,
+    [maxUpdates, limit]
+  );
+  return rows.map(rowToCreatedChannel);
+}
+
+/** 写回单个渠道的用量缓存并把刷新计数 +1（后台用量任务用）。 */
+export async function recordChannelUsage(
+  channelId: number,
+  usedQuota: number
+): Promise<void> {
+  const pool = await ensureReady();
+  await pool.query(
+    `UPDATE created_channels
+        SET used_quota = $2, usage_update_count = usage_update_count + 1, usage_updated_at = now()
+      WHERE channel_id = $1`,
+    [channelId, Math.max(0, Math.round(usedQuota))]
+  );
+}
+
+/** 汇总某前缀所有已建渠道的缓存用量（used_quota 之和；供按用户聚合统计）。 */
+export async function sumChannelUsedQuotaByPrefix(
+  prefix: string
+): Promise<number> {
+  const pool = await ensureReady();
+  const { rows } = await pool.query<{ sum: string | null }>(
+    `SELECT COALESCE(SUM(used_quota),0)::bigint AS sum
+       FROM created_channels WHERE prefix = $1`,
+    [prefix.trim()]
+  );
+  return Number(rows[0]?.sum ?? 0);
 }
 
 /** 某前缀下已成功创建的渠道（channel_id 非空），按序号倒序（最新在前）。 */

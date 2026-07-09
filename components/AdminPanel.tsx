@@ -62,10 +62,16 @@ interface ConfigResponse {
   refillIntervalMinutes: number;
   /** 优先级 6 渠道数量上限（本地检测配额，0~1000） */
   priority6Limit: number;
-  /** 优先级降级全局任务间隔（分钟，1~1440） */
+  /** 优先级对账全局任务间隔（分钟，1~1440） */
   priorityTaskIntervalMinutes: number;
-  /** 僵尸/退化判定宽限期（分钟，0~1440） */
-  demoteGraceMinutes: number;
+  /** 退化降级检测间隔（秒，5~86400） */
+  demoteIntervalSeconds: number;
+  /** 退化判定宽限期（秒，0~86400） */
+  demoteGraceSeconds: number;
+  /** 用量刷新频率（分钟，1~1440） */
+  usageRefreshIntervalMinutes: number;
+  /** 每渠道最多刷新用量次数（0~100） */
+  usageMaxUpdates: number;
   /** 全局上传限速·个数（窗口内最多上传 key 数，0=不限速） */
   globalUploadLimitCount: number;
   /** 全局上传限速窗口（分钟，1~1440） */
@@ -85,7 +91,10 @@ const DEFAULT_PROCESS_BATCH = 20;
 const DEFAULT_INTERVAL_MINUTES = 1;
 const DEFAULT_PRIORITY6_LIMIT = 6;
 const DEFAULT_PRIORITY_TASK_INTERVAL = 5;
-const DEFAULT_DEMOTE_GRACE = 5;
+const DEFAULT_DEMOTE_INTERVAL_SEC = 30;
+const DEFAULT_DEMOTE_GRACE_SEC = 30;
+const DEFAULT_USAGE_REFRESH_MIN = 10;
+const DEFAULT_USAGE_MAX_UPDATES = 2;
 const DEFAULT_UPLOAD_LIMIT_COUNT = 0; // 0=不限速
 const DEFAULT_UPLOAD_LIMIT_WINDOW = 10;
 const DEFAULT_MODELS = "claude-opus-4-6,claude-opus-4-7,claude-opus-4-8";
@@ -108,7 +117,16 @@ function ConfigCard() {
   const [priorityTaskInterval, setPriorityTaskInterval] = useState<number>(
     DEFAULT_PRIORITY_TASK_INTERVAL
   );
-  const [demoteGrace, setDemoteGrace] = useState<number>(DEFAULT_DEMOTE_GRACE);
+  const [demoteInterval, setDemoteInterval] = useState<number>(
+    DEFAULT_DEMOTE_INTERVAL_SEC
+  );
+  const [demoteGrace, setDemoteGrace] = useState<number>(
+    DEFAULT_DEMOTE_GRACE_SEC
+  );
+  const [usageRefresh, setUsageRefresh] = useState<number>(
+    DEFAULT_USAGE_REFRESH_MIN
+  );
+  const [usageMax, setUsageMax] = useState<number>(DEFAULT_USAGE_MAX_UPDATES);
   const [gLimitCount, setGLimitCount] = useState<number>(
     DEFAULT_UPLOAD_LIMIT_COUNT
   );
@@ -179,11 +197,28 @@ function ConfigCard() {
           ? data.priorityTaskIntervalMinutes
           : DEFAULT_PRIORITY_TASK_INTERVAL
       );
+      setDemoteInterval(
+        typeof data.demoteIntervalSeconds === "number" &&
+          data.demoteIntervalSeconds >= 5
+          ? data.demoteIntervalSeconds
+          : DEFAULT_DEMOTE_INTERVAL_SEC
+      );
       setDemoteGrace(
-        typeof data.demoteGraceMinutes === "number" &&
-          data.demoteGraceMinutes >= 0
-          ? data.demoteGraceMinutes
-          : DEFAULT_DEMOTE_GRACE
+        typeof data.demoteGraceSeconds === "number" &&
+          data.demoteGraceSeconds >= 0
+          ? data.demoteGraceSeconds
+          : DEFAULT_DEMOTE_GRACE_SEC
+      );
+      setUsageRefresh(
+        typeof data.usageRefreshIntervalMinutes === "number" &&
+          data.usageRefreshIntervalMinutes > 0
+          ? data.usageRefreshIntervalMinutes
+          : DEFAULT_USAGE_REFRESH_MIN
+      );
+      setUsageMax(
+        typeof data.usageMaxUpdates === "number" && data.usageMaxUpdates >= 0
+          ? data.usageMaxUpdates
+          : DEFAULT_USAGE_MAX_UPDATES
       );
       setGLimitCount(
         typeof data.globalUploadLimitCount === "number" &&
@@ -263,11 +298,26 @@ function ConfigCard() {
         Math.round(Number(priorityTaskInterval) || DEFAULT_PRIORITY_TASK_INTERVAL)
       )
     );
-    // 宽限期夹到 0~1440 分钟（允许 0=建后即可判定，故不能用 || 兜底）
+    // 退化降级检测间隔夹到 5~86400 秒
+    const safeDemoteInterval = Math.min(
+      86400,
+      Math.max(5, Math.round(Number(demoteInterval) || DEFAULT_DEMOTE_INTERVAL_SEC))
+    );
+    // 宽限期夹到 0~86400 秒（允许 0=建后即可判定，故不能用 || 兜底）
     const graceRaw = Number(demoteGrace);
     const safeGrace = Number.isNaN(graceRaw)
-      ? DEFAULT_DEMOTE_GRACE
-      : Math.min(1440, Math.max(0, Math.round(graceRaw)));
+      ? DEFAULT_DEMOTE_GRACE_SEC
+      : Math.min(86400, Math.max(0, Math.round(graceRaw)));
+    // 用量刷新频率夹到 1~1440 分钟
+    const safeUsageRefresh = Math.min(
+      1440,
+      Math.max(1, Math.round(Number(usageRefresh) || DEFAULT_USAGE_REFRESH_MIN))
+    );
+    // 每渠道最多刷新用量次数夹到 0~100（允许 0=不刷新，故不能用 || 兜底）
+    const usageMaxRaw = Number(usageMax);
+    const safeUsageMax = Number.isNaN(usageMaxRaw)
+      ? DEFAULT_USAGE_MAX_UPDATES
+      : Math.min(100, Math.max(0, Math.round(usageMaxRaw)));
     // 上传限速·个数允许 0=不限速（不能用 || 兜底）；窗口夹到 1~1440 分钟
     const gCountRaw = Number(gLimitCount);
     const safeGCount = Number.isNaN(gCountRaw)
@@ -301,7 +351,10 @@ function ConfigCard() {
           refillIntervalMinutes: safeInterval,
           priority6Limit: safeP6,
           priorityTaskIntervalMinutes: safePriInterval,
-          demoteGraceMinutes: safeGrace,
+          demoteIntervalSeconds: safeDemoteInterval,
+          demoteGraceSeconds: safeGrace,
+          usageRefreshIntervalMinutes: safeUsageRefresh,
+          usageMaxUpdates: safeUsageMax,
           globalUploadLimitCount: safeGCount,
           globalUploadLimitWindowMinutes: safeGWindow,
           userUploadLimitCount: safeUCount,
@@ -502,16 +555,55 @@ function ConfigCard() {
                 />
               </Field>
               <Field
-                label="僵尸判定宽限期（分钟）"
-                hint="渠道建后超过此时长才纳入降级判定，避免刚建误判；0=建后即判，0~1440"
+                label="退化降级检测间隔（秒）"
+                hint="每 N 秒用一次 status-batch 检测高优先级渠道，任一站点禁用即降到5；下限5秒防打爆naci，5~86400"
+              >
+                <TextInput
+                  type="number"
+                  min={5}
+                  max={86400}
+                  value={Number.isNaN(demoteInterval) ? "" : demoteInterval}
+                  onChange={(e) => setDemoteInterval(e.target.valueAsNumber)}
+                  placeholder={String(DEFAULT_DEMOTE_INTERVAL_SEC)}
+                />
+              </Field>
+              <Field
+                label="退化判定宽限期（秒）"
+                hint="渠道建后超过此时长才纳入降级判定，避免刚建误判；0=建后即判，0~86400"
               >
                 <TextInput
                   type="number"
                   min={0}
-                  max={1440}
+                  max={86400}
                   value={Number.isNaN(demoteGrace) ? "" : demoteGrace}
                   onChange={(e) => setDemoteGrace(e.target.valueAsNumber)}
-                  placeholder={String(DEFAULT_DEMOTE_GRACE)}
+                  placeholder={String(DEFAULT_DEMOTE_GRACE_SEC)}
+                />
+              </Field>
+              <Field
+                label="用量刷新频率（分钟）"
+                hint="后台每 N 分钟批量拉一次 used-quota 更新渠道用量缓存，1~1440"
+              >
+                <TextInput
+                  type="number"
+                  min={1}
+                  max={1440}
+                  value={Number.isNaN(usageRefresh) ? "" : usageRefresh}
+                  onChange={(e) => setUsageRefresh(e.target.valueAsNumber)}
+                  placeholder={String(DEFAULT_USAGE_REFRESH_MIN)}
+                />
+              </Field>
+              <Field
+                label="每渠道最多刷新用量次数"
+                hint="某渠道刷够此次数即冻结、不再拉用量，避免雪崩；0=不刷新用量，0~100"
+              >
+                <TextInput
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={Number.isNaN(usageMax) ? "" : usageMax}
+                  onChange={(e) => setUsageMax(e.target.valueAsNumber)}
+                  placeholder={String(DEFAULT_USAGE_MAX_UPDATES)}
                 />
               </Field>
               <Field

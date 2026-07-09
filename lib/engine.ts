@@ -10,12 +10,15 @@ import {
   createChannelsDrain,
   demoteAllDegradedChannels,
   reconcileTrackedPriorities,
+  refreshChannelUsage,
   refreshPrefixRealtime,
 } from "./channelService";
 import {
   channelsWithPending,
+  clampDemoteIntervalSeconds,
   clampIntervalMinutes,
   clampPriorityTaskIntervalMinutes,
+  clampUsageRefreshIntervalMinutes,
   countChannelsAtPriorityForPrefix,
   findUserByChannelName,
   getConfig,
@@ -32,10 +35,14 @@ const INITIAL_DELAY_MS = 5_000;
 const DEFAULT_PRIORITY_INTERVAL_MS = 5 * 60_000;
 /** 优先级对账任务首次延迟（ms）：错开补给引擎首轮，避开建渠道与对账同时抢 naci。 */
 const PRIORITY_INITIAL_DELAY_MS = 20_000;
-/** 退化降级快循环间隔（ms）：固定 30 秒一次，仅 1 个 status-batch 请求，开销小。 */
+/** 退化降级快循环默认间隔（ms）：读到配置(demoteIntervalSeconds)前的兜底，与 store seed(30s)一致。 */
 const DEMOTE_FAST_INTERVAL_MS = 30_000;
 /** 退化降级快循环首次延迟（ms）：错开补给(5s)与对账(20s)首轮。 */
 const DEMOTE_INITIAL_DELAY_MS = 30_000;
+/** 用量刷新默认间隔（ms）——读到配置(usageRefreshIntervalMinutes)前的兜底，与 store seed(10 分钟)一致。 */
+const DEFAULT_USAGE_INTERVAL_MS = 10 * 60_000;
+/** 用量刷新首次延迟（ms）：错开其它首轮。 */
+const USAGE_INITIAL_DELAY_MS = 45_000;
 /** claimed 死行回收阈值（分钟）：超过则视为进程崩溃残留，退回 pending 重试。 */
 const CLAIM_STALE_MINUTES = 10;
 
@@ -59,10 +66,16 @@ interface EngineState {
   priorityTimer: ReturnType<typeof setTimeout> | null;
   priorityIntervalMs: number; // 当前生效的对账任务间隔(ms)
   lastPriorityRunAt: number | null; // 上次对账任务完成时间戳(ms)
-  // —— 退化降级快循环（固定 30s，独立定时器） ——
+  // —— 退化降级快循环（间隔由 demoteIntervalSeconds 配置，独立定时器） ——
   demoteRunning: boolean; // 防重入（降级）
   demoteTimer: ReturnType<typeof setTimeout> | null;
+  demoteIntervalMs: number; // 当前生效的降级检测间隔(ms)，每轮从配置刷新
   lastDemoteRunAt: number | null; // 上次降级任务完成时间戳(ms)
+  // —— 用量刷新任务（间隔由 usageRefreshIntervalMinutes 配置，独立定时器） ——
+  usageRunning: boolean; // 防重入（用量刷新）
+  usageTimer: ReturnType<typeof setTimeout> | null;
+  usageIntervalMs: number; // 当前生效的用量刷新间隔(ms)，每轮从配置刷新
+  lastUsageRunAt: number | null; // 上次用量刷新完成时间戳(ms)
 }
 
 function engineState(): EngineState {
@@ -82,7 +95,12 @@ function engineState(): EngineState {
       lastPriorityRunAt: null,
       demoteRunning: false,
       demoteTimer: null,
+      demoteIntervalMs: DEMOTE_FAST_INTERVAL_MS,
       lastDemoteRunAt: null,
+      usageRunning: false,
+      usageTimer: null,
+      usageIntervalMs: DEFAULT_USAGE_INTERVAL_MS,
+      lastUsageRunAt: null,
     };
   } else {
     if (!g.__keyloadEngine.lastResults) g.__keyloadEngine.lastResults = {};
@@ -441,14 +459,17 @@ async function runReconcileTask(): Promise<void> {
 }
 
 /**
- * 退化降级快循环（固定 30s）：直接用一次 status-batch 读「本地记为高优先级(>5)」的渠道状态，
- * 任一站点被禁用即降到 5，腾出稀缺的优先级配额。仅高优先级模式下降级后立即补建。demoteRunning 防重入。
+ * 退化降级快循环（间隔由 demoteIntervalSeconds 配置，默认 30s）：直接用一次 status-batch 读
+ * 「本地记为高优先级(>5)」的渠道状态，任一站点被禁用即降到 5，腾出稀缺的优先级配额。
+ * 仅高优先级模式下降级后立即补建。demoteRunning 防重入。
  */
 async function runDemoteTask(): Promise<void> {
   const state = engineState();
   if (state.demoteRunning) return;
   state.demoteRunning = true;
   try {
+    const cfg = await getConfig();
+    state.demoteIntervalMs = clampDemoteIntervalSeconds(cfg.demoteIntervalSeconds) * 1000;
     const demoted = await demoteAllDegradedChannels();
     if (demoted > 0) {
       await safeLog(
@@ -457,7 +478,6 @@ async function runDemoteTask(): Promise<void> {
         `退化降级：本轮降级 ${demoted} 个退化渠道（6→5，腾出优先级配额）`
       );
       // 仅高优先级模式：刚回收了名额 → 立即把池里等待的 key 补进空出的名额，无需等下一个补给间隔。
-      const cfg = await getConfig();
       if (cfg.onlyHighPriorityEnabled && cfg.autoRefillEnabled) {
         try {
           const built = await distributeHighPriorityRoundRobin();
@@ -498,16 +518,61 @@ async function runReconcileAndReschedule(): Promise<void> {
   }
 }
 
-/** 跑一次退化降级并固定 30s 后再跑（自调度 setTimeout 链）。 */
+/** 跑一次退化降级并按当前生效间隔安排下一次（自调度 setTimeout 链）。 */
 async function runDemoteAndReschedule(): Promise<void> {
   const state = engineState();
   try {
     await runDemoteTask();
   } finally {
+    const delay =
+      state.demoteIntervalMs > 0 ? state.demoteIntervalMs : DEMOTE_FAST_INTERVAL_MS;
     if (state.demoteTimer) clearTimeout(state.demoteTimer);
     state.demoteTimer = setTimeout(() => {
       void runDemoteAndReschedule();
-    }, DEMOTE_FAST_INTERVAL_MS);
+    }, delay);
+  }
+}
+
+/**
+ * 用量刷新任务（间隔由 usageRefreshIntervalMinutes 配置）：按频率批量刷新未刷满次数的渠道用量。
+ * 每渠道刷够 usageMaxUpdates 次即冻结，避免持续对老渠道拉 used-quota 造成雪崩。usageRunning 防重入。
+ */
+async function runUsageTask(): Promise<void> {
+  const state = engineState();
+  if (state.usageRunning) return;
+  state.usageRunning = true;
+  try {
+    const cfg = await getConfig();
+    state.usageIntervalMs =
+      clampUsageRefreshIntervalMinutes(cfg.usageRefreshIntervalMinutes) * 60_000;
+    const updated = await refreshChannelUsage();
+    if (updated > 0) {
+      await safeLog(
+        "info",
+        undefined,
+        `用量刷新：本轮更新 ${updated} 个渠道用量缓存`
+      );
+    }
+  } catch (err) {
+    console.error("[engine] 用量刷新任务失败:", err);
+  } finally {
+    state.usageRunning = false;
+    state.lastUsageRunAt = Date.now();
+  }
+}
+
+/** 跑一次用量刷新并按当前生效间隔安排下一次（自调度 setTimeout 链）。 */
+async function runUsageAndReschedule(): Promise<void> {
+  const state = engineState();
+  try {
+    await runUsageTask();
+  } finally {
+    const delay =
+      state.usageIntervalMs > 0 ? state.usageIntervalMs : DEFAULT_USAGE_INTERVAL_MS;
+    if (state.usageTimer) clearTimeout(state.usageTimer);
+    state.usageTimer = setTimeout(() => {
+      void runUsageAndReschedule();
+    }, delay);
   }
 }
 
@@ -527,12 +592,17 @@ export function startEngine(): void {
     void runReconcileAndReschedule();
   }, PRIORITY_INITIAL_DELAY_MS);
 
-  // 退化降级快循环（固定 30s；独立定时器，错开补给与对账首轮）
+  // 退化降级快循环（间隔按配置 demoteIntervalSeconds；独立定时器，错开补给与对账首轮）
   state.demoteTimer = setTimeout(() => {
     void runDemoteAndReschedule();
   }, DEMOTE_INITIAL_DELAY_MS);
 
+  // 用量刷新任务（间隔按配置 usageRefreshIntervalMinutes；每渠道刷够上限即冻结防雪崩）
+  state.usageTimer = setTimeout(() => {
+    void runUsageAndReschedule();
+  }, USAGE_INITIAL_DELAY_MS);
+
   console.log(
-    "[engine] 定时建渠道引擎 + 优先级对账(分钟级) + 退化降级(30s) 已启动"
+    "[engine] 定时建渠道引擎 + 优先级对账(分钟级) + 退化降级(可配秒级) + 用量刷新(可配分钟级) 已启动"
   );
 }

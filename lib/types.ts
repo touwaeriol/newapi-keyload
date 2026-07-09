@@ -56,15 +56,28 @@ export interface SystemConfig {
    */
   priority6Limit: number;
   /**
-   * 优先级降级定时任务间隔（分钟，1~1440）：**全局**单任务定期扫描所有退化渠道并从 6 降到 5，
-   * 腾出优先级 6 配额；不再每个渠道/前缀每轮各自处理。
+   * 优先级对账定时任务间隔（分钟，1~1440）：**全局**单任务定期把本地优先级与 naci 实际值对账，
+   * 修正静默降级漂移；退化降级检测由独立快循环按秒执行。
    */
   priorityTaskIntervalMinutes: number;
   /**
-   * 僵尸/退化判定宽限期（分钟，0~1440）：渠道创建后需超过此时长才纳入降级判定，
+   * 退化降级检测间隔（秒，5~86400）：独立快循环每 N 秒用一次 status-batch 读高优先级渠道状态，
+   * 任一站点禁用即降到 5。下限 5s 防止打爆 naci。
+   */
+  demoteIntervalSeconds: number;
+  /**
+   * 退化判定宽限期（秒，0~86400）：渠道创建后需超过此时长才纳入降级判定，
    * 避免刚建、站点尚未就绪时被误判降级。0=不设宽限，建后即可被判定。
    */
-  demoteGraceMinutes: number;
+  demoteGraceSeconds: number;
+  /**
+   * 用量刷新频率（分钟，1~1440）：后台任务每 N 分钟批量拉一次 used-quota 更新渠道用量缓存。
+   */
+  usageRefreshIntervalMinutes: number;
+  /**
+   * 每渠道最多刷新用量次数（0~100）：某渠道刷够此次数即冻结、不再拉 used-quota，避免雪崩。0=不刷新用量。
+   */
+  usageMaxUpdates: number;
   /** 全局上传限速：窗口内最多上传（推站点）多少个 key（0=不限速） */
   globalUploadLimitCount: number;
   /** 全局上传限速窗口（分钟，1~1440） */
