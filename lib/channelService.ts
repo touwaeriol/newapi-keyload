@@ -33,6 +33,7 @@ import {
   deleteCreatedChannel,
   finalizeCreatedChannel,
   getConfig,
+  getCreatedChannelByChannelId,
   getUploadedKeyCount,
   listChannelsAbovePriority,
   listRecentCreatedChannels,
@@ -355,13 +356,12 @@ export async function createChannelFromNextBatch(
   // 仅高优先级模式：已在函数入口门控过名额，此处**强制优先级6**，不走降级到5。
   let desiredPriority = FIXED_PRIORITY;
   let demoteReason = "";
-  if (cfg.onlyHighPriorityEnabled) {
-    // 仅高优先级模式：直接上传强制普通优先级(5)，不占用高优先级名额；
-    // 定时任务路径已在入口门控过名额，此处保持优先级6，不走降级。
-    if (opts.forceNormalPriority) {
-      desiredPriority = DEMOTED_PRIORITY;
-      demoteReason = "直接上传（仅高优先级模式下建普通渠道，不占用高优先级名额）";
-    }
+  if (opts.forceNormalPriority) {
+    // 直接上传：**任何模式**下都不占用稀缺的高优先级名额，直接建普通(优先级5)渠道立即上传。
+    desiredPriority = DEMOTED_PRIORITY;
+    demoteReason = "直接上传（不占用高优先级名额，建普通渠道）";
+  } else if (cfg.onlyHighPriorityEnabled) {
+    // 仅高优先级模式的定时任务路径：已在入口门控过名额，此处保持优先级6，不走降级。
   } else {
     const priority6Count = await countChannelsAtPriority(FIXED_PRIORITY);
     if (user.allowHighPriority === false) {
@@ -392,7 +392,8 @@ export async function createChannelFromNextBatch(
         models: cfg.models,
         priority: desiredPriority,
       });
-      if (desiredPriority === DEMOTED_PRIORITY) {
+      // 直接上传(forceNormalPriority)按批必然是 5，逐渠道记日志太吵，由 directUploadKeys 汇总记一条
+      if (desiredPriority === DEMOTED_PRIORITY && !opts.forceNormalPriority) {
         await addLog({
           level: "info",
           actor: user.username,
@@ -604,10 +605,11 @@ export interface DirectUploadResult {
 }
 
 /**
- * 直接上传：先把本批 key 落本地池去重，再把池里的 pending 逐批建成新渠道（一次性清空）。
- * 与「提交上传」（只落池、等引擎/手动按钮）区别在于立即建渠道。
- * 例外：**仅高优先级模式**下直接上传建的是**普通(优先级5)渠道**（不占用稀缺高优先级名额），
- * 高优先级(优先级6)渠道只能经「提交上传」入池、由定时任务在各用户间公平分配。
+ * 直接上传：先把本批 key 落本地池去重，再把池里的 pending **一次性清空**——
+ * 按管理员「聚合 key 数量」(uploadBatchSize) 拆分成多个渠道，尾批不足一整批也照建（少量上传）。
+ * 与「提交上传」（只落池、等引擎/手动按钮）区别在于立即建完。
+ * 优先级：直接上传建的**一律是普通(优先级5)渠道**（任何模式下都不占用稀缺高优先级名额）；
+ * 高优先级(优先级6)渠道只能经「提交上传」入池、由定时/手动路径按配额创建。
  */
 export async function directUploadKeys(
   user: User,
@@ -624,23 +626,19 @@ export async function directUploadKeys(
   }
 
   const { added } = await addKeysToPool(prefix, cleanKeys);
-  const cfg = await getConfig();
 
-  // 仅高优先级模式：直接上传**不占用**稀缺的高优先级名额，直接建**普通(优先级5)**渠道立即上传；
-  // 高优先级(优先级6)渠道只能通过「提交上传」入池、由定时任务在各用户间公平分配。
-  const drain = await createChannelsDrain(
-    user,
-    cfg.processBatchSize,
-    cfg.onlyHighPriorityEnabled ? { forceNormalPriority: true } : {}
-  );
+  // 直接上传 = 立即传完：不设本轮 key 数上限（安全阀 MAX_CHANNELS_PER_DRAIN 兜底），
+  // 每渠道按「聚合 key 数量」拆分，尾批不足一整批也照建；一律建普通(优先级5)渠道，
+  // 不占用稀缺高优先级名额（上传限速仍生效，触发后剩余留池由引擎续传）。
+  const drain = await createChannelsDrain(user, Number.MAX_SAFE_INTEGER, {
+    forceNormalPriority: true,
+  });
 
   await addLog({
     level: "info",
     actor: user.username,
     channelName: prefix,
-    message: `直接上传：新录入 ${added} 个，建 ${drain.createdChannels} 个${
-      cfg.onlyHighPriorityEnabled ? "普通(优先级5)" : ""
-    }新渠道共传 ${drain.pushed} 个 key（剩余待上传 ${drain.poolPending}）${
+    message: `直接上传：新录入 ${added} 个，建 ${drain.createdChannels} 个普通(优先级5)新渠道共传 ${drain.pushed} 个 key（剩余待上传 ${drain.poolPending}）${
       drain.limited ? "，已触发上传限速，剩余等窗口滚动自动续传" : ""
     }`,
   });
@@ -886,8 +884,16 @@ export async function demoteAllDegradedChannels(): Promise<number> {
   let statusMap: Awaited<ReturnType<typeof getChannelsStatusBatch>>;
   try {
     statusMap = await getChannelsStatusBatch(ids);
-  } catch {
-    return 0; // 读站点状态失败，本轮跳过
+  } catch (err) {
+    // 读站点状态失败（naci 常见 429 限流）→ 本轮跳过，但必须留痕，否则任务看似在跑实则一直空转
+    await addLog({
+      level: "warn",
+      actor: "engine",
+      message: `优先级任务：读取 ${ids.length} 个渠道站点状态失败，本轮跳过：${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    });
+    return 0;
   }
 
   let demoted = 0;
@@ -931,6 +937,36 @@ export async function demoteAllDegradedChannels(): Promise<number> {
 
   for (const p of affectedPrefixes) invalidateChannelCache(p);
   return demoted;
+}
+
+/**
+ * 手动一键回退优先级：把某已建渠道在 naci 上的优先级设为 DEMOTED_PRIORITY(5)，
+ * 并同步回写本地 created_channels（立即释放优先级 6 名额，不依赖定时任务的退化判定）。
+ * expectedPrefix 非空时校验渠道属于该前缀（用户只能回退自己的渠道）；管理员传 null 跳过校验。
+ * 返回 { channelName, from, to }；渠道不存在或不属于该前缀返回 null。naci 调用失败向上抛。
+ */
+export async function demoteChannelManually(
+  actor: string,
+  channelId: number,
+  expectedPrefix: string | null
+): Promise<{ channelName: string; from: number; to: number } | null> {
+  const rec = await getCreatedChannelByChannelId(channelId);
+  if (!rec) return null;
+  if (expectedPrefix != null && rec.prefix !== expectedPrefix.trim()) return null;
+
+  // 即使本地已记 5 也照常下发（可顺带纠正 naci/本地漂移，幂等）
+  await setChannelPriority(channelId, DEMOTED_PRIORITY);
+  await updateCreatedChannelPriority(channelId, DEMOTED_PRIORITY);
+  invalidateChannelCache(rec.prefix);
+
+  await addLog({
+    level: "info",
+    actor,
+    channelName: rec.prefix,
+    channelId,
+    message: `手动回退渠道 ${rec.channelName} 优先级 ${rec.priority}→${DEMOTED_PRIORITY}（释放优先级配额）`,
+  });
+  return { channelName: rec.channelName, from: rec.priority, to: DEMOTED_PRIORITY };
 }
 
 /** 对账每轮扫描的最近渠道数（有界，控制 naci 请求量）。naci 优先级6配额小、总被最新渠道占用，覆盖最近这批即可。 */

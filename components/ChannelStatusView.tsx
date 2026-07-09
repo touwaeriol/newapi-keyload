@@ -169,6 +169,7 @@ function isExhausted(channel: ChannelStatus): boolean {
 export function ChannelStatusView({
   channel,
   onSiteToggle,
+  onDemote,
 }: {
   channel: ChannelStatus | null;
   onSiteToggle?: (
@@ -176,6 +177,8 @@ export function ChannelStatusView({
     siteId: number,
     on: boolean
   ) => Promise<void>;
+  /** 手动一键回退优先级（6→5）；传入时在高优先级渠道行显示「回退P5」按钮 */
+  onDemote?: (channelId: number) => Promise<void>;
 }) {
   if (!channel) return null;
 
@@ -214,6 +217,7 @@ export function ChannelStatusView({
                 key={c.id}
                 channel={c}
                 onSiteToggle={onSiteToggle}
+                onDemote={onDemote}
               />
             ))}
           </div>
@@ -234,6 +238,7 @@ export function ChannelStatusView({
 function ChannelRow({
   channel,
   onSiteToggle,
+  onDemote,
 }: {
   channel: CreatedChannelView;
   onSiteToggle?: (
@@ -241,7 +246,18 @@ function ChannelRow({
     siteId: number,
     on: boolean
   ) => Promise<void>;
+  onDemote?: (channelId: number) => Promise<void>;
 }) {
+  const [demoting, setDemoting] = useState(false);
+  async function demote() {
+    if (!onDemote || demoting) return;
+    setDemoting(true);
+    try {
+      await onDemote(channel.channelId);
+    } finally {
+      setDemoting(false);
+    }
+  }
   const alive = channel.aliveKeyCount;
   const platform = channel.platformKeyCount;
   const exhausted = (platform ?? 0) > 0 && alive === 0;
@@ -266,6 +282,18 @@ function ChannelRow({
             </Badge>
           )}
           {channelBadge(channel.status)}
+          {onDemote && (channel.priority ?? 0) > 5 && (
+            <button
+              type="button"
+              onClick={demote}
+              disabled={demoting}
+              title="手动把该渠道优先级回退到 5（同步 naci 与本地记录，立即释放高优先级名额）"
+              className="inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {demoting ? <Spinner className="h-3 w-3" /> : null}
+              回退P5
+            </button>
+          )}
         </div>
       </div>
 

@@ -1010,6 +1010,18 @@ export async function updateCreatedChannelPriority(
   );
 }
 
+/** 按 naci channel_id 查一条已建渠道本地记录（不存在返回 null）。 */
+export async function getCreatedChannelByChannelId(
+  channelId: number
+): Promise<CreatedChannel | null> {
+  const pool = await ensureReady();
+  const { rows } = await pool.query<CreatedChannelRow>(
+    `SELECT * FROM created_channels WHERE channel_id = $1 LIMIT 1`,
+    [channelId]
+  );
+  return rows.length > 0 ? rowToCreatedChannel(rows[0]) : null;
+}
+
 /** 删除一条占位/失败的 created_channels 行（naci 创建失败时回滚序号）。 */
 export async function deleteCreatedChannel(id: string): Promise<void> {
   const pool = await ensureReady();

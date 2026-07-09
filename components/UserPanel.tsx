@@ -119,6 +119,27 @@ export function UserPanel({ user }: { user: SafeUser }) {
     [toast]
   );
 
+  // 手动一键回退优先级（6→5）：同步 naci 与本地记录，立即释放高优先级名额
+  const handleDemote = useCallback(
+    async (channelId: number) => {
+      try {
+        const res = await apiFetch<{
+          channelName: string;
+          from: number;
+          to: number;
+        }>("/api/my/demote-channel", {
+          method: "POST",
+          body: JSON.stringify({ channelId }),
+        });
+        toast.success(`已回退 ${res.channelName} 优先级 ${res.from}→${res.to}`);
+        fetchChannel(true);
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "回退优先级失败");
+      }
+    },
+    [toast, fetchChannel]
+  );
+
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       <ChannelCard
@@ -127,6 +148,7 @@ export function UserPanel({ user }: { user: SafeUser }) {
         loading={loading}
         onRefresh={() => fetchChannel(false)}
         onSiteToggle={handleSiteToggle}
+        onDemote={handleDemote}
       />
       <UploadCard
         onUploaded={() => fetchChannel(false)}
@@ -145,6 +167,7 @@ function ChannelCard({
   loading,
   onRefresh,
   onSiteToggle,
+  onDemote,
 }: {
   user: SafeUser;
   channel: ChannelStatus | null;
@@ -155,6 +178,7 @@ function ChannelCard({
     siteId: number,
     on: boolean
   ) => Promise<void>;
+  onDemote: (channelId: number) => Promise<void>;
 }) {
   const toast = useToast();
   const [creating, setCreating] = useState(false);
@@ -222,7 +246,11 @@ function ChannelCard({
           <Spinner className="h-4 w-4" /> 加载中…
         </div>
       ) : (
-        <ChannelStatusView channel={channel} onSiteToggle={onSiteToggle} />
+        <ChannelStatusView
+          channel={channel}
+          onSiteToggle={onSiteToggle}
+          onDemote={onDemote}
+        />
       )}
     </Card>
   );
@@ -321,7 +349,7 @@ function UploadCard({
   return (
     <Card
       title="上传 Key"
-      subtitle="每行一个 key。提交上传＝先录入本地库，由「上传一批」按钮或定时引擎分批建渠道；直接上传＝录入并立即把待上传的 key 逐批建成新渠道"
+      subtitle="每行一个 key。提交上传＝先录入本地库，由「上传一批」按钮或定时引擎分批建渠道；直接上传＝按「聚合 key 数量」拆分立即建成多个普通(优先级5)渠道传完"
     >
       <div className="space-y-3">
         {onlyHighPriority ? (
@@ -356,10 +384,10 @@ function UploadCard({
               disabled={busy || !manualUploadEnabled}
               title={
                 onlyHighPriority
-                  ? "仅高优先级模式：直接上传会立即创建普通(非高优先级)渠道；高优先级渠道请用「提交上传」由定时任务公平分配"
+                  ? "仅高优先级模式：直接上传会立即创建普通(优先级5)渠道；高优先级渠道请用「提交上传」由定时任务公平分配"
                   : !manualUploadEnabled
                   ? "管理员已关闭手动上传，请用「提交上传」录入本地库"
-                  : undefined
+                  : "立即按「聚合 key 数量」拆分建普通(优先级5)渠道传完，不占用高优先级名额"
               }
             >
               直接上传（建渠道）

@@ -943,6 +943,29 @@ function UsersCard() {
     }
   }
 
+  // 管理员手动一键回退优先级（6→5），完成后就地刷新弹窗里的渠道数据
+  async function demoteChannel(channelId: number) {
+    try {
+      const res = await apiFetch<{
+        channelName: string;
+        from: number;
+        to: number;
+      }>("/api/admin/channels/demote", {
+        method: "POST",
+        body: JSON.stringify({ channelId }),
+      });
+      toast.success(`已回退 ${res.channelName} 优先级 ${res.from}→${res.to}`);
+      if (channelTarget) {
+        const data = await apiFetch<{ channel: ChannelStatus }>(
+          `/api/admin/users/${channelTarget.id}/channel`
+        );
+        setChannelData(data.channel);
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "回退优先级失败");
+    }
+  }
+
   async function confirmDelete() {
     if (!deleteTarget) return;
     setDeleting(true);
@@ -1129,7 +1152,7 @@ function UsersCard() {
               渠道前缀：
               <b className="text-slate-700">{channelTarget?.channelName}</b>
             </p>
-            <ChannelStatusView channel={channelData} />
+            <ChannelStatusView channel={channelData} onDemote={demoteChannel} />
           </div>
         )}
       </Modal>
