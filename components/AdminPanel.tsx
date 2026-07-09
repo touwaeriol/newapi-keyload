@@ -673,7 +673,8 @@ interface UploadLimitResponse {
   users: UploadLimitUserRow[];
 }
 
-const UPLOAD_LIMIT_POLL_INTERVAL = 15000;
+// 30s：该接口每轮做 getUsers + 每用户 N+1 子查询，管理页常驻，拉长间隔削减全表扫描频率
+const UPLOAD_LIMIT_POLL_INTERVAL = 30000;
 
 /** 用量文案：「已用 X / Y · Z分钟窗口」，不限速时「已用 X · 不限速」 */
 function usageText(u: UploadLimitUsage): string {
@@ -828,8 +829,9 @@ function fmtUsd(v?: number | null) {
   })}`;
 }
 
-/** 用户列表轮询间隔（毫秒） */
-const USERS_POLL_INTERVAL = 15000;
+/** 用户列表轮询间隔（毫秒）。该接口每轮 3 个全表扫描(getUsers+poolCountsAll+createdChannelCountsAll)，
+ * 管理页常驻，30s 足够新鲜且把全表扫描频率减半。 */
+const USERS_POLL_INTERVAL = 30000;
 
 /**
  * 「可用/总数」单元格：可用 = 平台 Key − 禁用 Key。

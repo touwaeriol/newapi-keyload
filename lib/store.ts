@@ -1099,37 +1099,6 @@ export async function countChannelsAtPriorityForPrefix(
 }
 
 /**
- * 全部已成功创建（channel_id 非空）的渠道，供优先级对账全量同步 naci 真实优先级
- * （本地缓存可能双向漂移：naci 静默降到5、或建时按6而本地记5）。
- */
-export async function listAllCreatedChannels(): Promise<CreatedChannel[]> {
-  const pool = await ensureReady();
-  const { rows } = await pool.query<CreatedChannelRow>(
-    `SELECT * FROM created_channels WHERE channel_id IS NOT NULL`
-  );
-  return rows.map(rowToCreatedChannel);
-}
-
-/**
- * 最近创建的 N 个已成功渠道（按 created_at 倒序），供优先级对账「有界扫描」。
- * naci 的优先级6配额小、且总是被最新渠道占用，故只需覆盖最近这批即可抓到所有真正的优先级6渠道。
- */
-export async function listRecentCreatedChannels(
-  limit: number
-): Promise<CreatedChannel[]> {
-  const pool = await ensureReady();
-  const n = Math.max(1, Math.min(500, Math.floor(limit)));
-  const { rows } = await pool.query<CreatedChannelRow>(
-    `SELECT * FROM created_channels
-     WHERE channel_id IS NOT NULL
-     ORDER BY created_at DESC
-     LIMIT $1`,
-    [n]
-  );
-  return rows.map(rowToCreatedChannel);
-}
-
-/**
  * 全局取所有优先级 > 阈值、已成功创建的渠道（供降级定时任务扫描退化渠道）。
  * 按 created_at 升序（老渠道优先降级），跨全部前缀。宽限期/退化判定由调用方处理。
  */

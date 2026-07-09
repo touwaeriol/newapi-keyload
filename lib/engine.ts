@@ -201,6 +201,28 @@ async function processPrefix(
 const RR_HARD_CAP = 5000;
 
 /**
+ * 逐前缀刷新实时缓存之间的节流（毫秒）：每前缀刷新要发 2 次 naci 请求
+ *（getChannelsStatusBatch + getChannelsUsedQuota），前缀多时若背靠背发送会瞬时打爆 naci 触发 429。
+ * 加此间隔把 `2×前缀数` 个请求在时间上摊开（如 50 前缀×350ms≈18s，仍在默认 60s 轮内）。
+ */
+const REFRESH_THROTTLE_MS = 350;
+
+/**
+ * 刷新「有已建渠道的前缀」实时缓存（保持管理端统计新鲜），**前缀之间节流**削峰。
+ * 供 tick / kick 的「仅高优先级」分支复用，避免各自重复写循环。
+ */
+async function refreshCreatedPrefixes(): Promise<void> {
+  const prefixes = await prefixesWithCreatedChannels();
+  for (let i = 0; i < prefixes.length; i++) {
+    const user = await findUserByChannelName(prefixes[i]);
+    if (user) await refreshPrefixRealtime(user);
+    if (i < prefixes.length - 1) {
+      await new Promise((r) => setTimeout(r, REFRESH_THROTTLE_MS));
+    }
+  }
+}
+
+/**
  * 「仅高优先级」模式的公平分配器：把空闲优先级6名额按**最少者优先的轮转**统一分给所有有待上传的用户。
  *
  * **统一优先级**：所有用户同等对待，不区分每用户的高优先级权限/独立配额，只受全局名额（priority6Limit）限制；
@@ -303,11 +325,8 @@ export async function tick(): Promise<void> {
     // 否则走原有「每前缀 drain 到底」逻辑。
     if (cfg.onlyHighPriorityEnabled && autoRefill) {
       await distributeHighPriorityRoundRobin();
-      // 刷新有已建渠道的前缀缓存（保持管理端统计新鲜）
-      for (const prefix of await prefixesWithCreatedChannels()) {
-        const user = await findUserByChannelName(prefix);
-        if (user) await refreshPrefixRealtime(user);
-      }
+      // 刷新有已建渠道的前缀缓存（保持管理端统计新鲜），前缀间节流削峰
+      await refreshCreatedPrefixes();
       return;
     }
 
@@ -317,8 +336,13 @@ export async function tick(): Promise<void> {
       new Set([...pendingPrefixes, ...createdPrefixes])
     );
 
-    for (const prefix of targets) {
-      await processPrefix(prefix, autoRefill, processBatchSize);
+    for (let i = 0; i < targets.length; i++) {
+      await processPrefix(targets[i], autoRefill, processBatchSize);
+      // 前缀间节流：无 pending 的前缀在 processPrefix 内会刷新实时缓存(2 次 naci)，
+      // 背靠背发送易触发 naci 429，摊开发送。
+      if (i < targets.length - 1) {
+        await new Promise((r) => setTimeout(r, REFRESH_THROTTLE_MS));
+      }
     }
   } catch (err) {
     console.error("[engine] tick 失败:", err);
@@ -347,10 +371,7 @@ export function kickEngine(prefix: string): void {
       // 其余模式按原逻辑只处理该前缀。
       if (cfg.onlyHighPriorityEnabled && cfg.autoRefillEnabled) {
         await distributeHighPriorityRoundRobin();
-        for (const p of await prefixesWithCreatedChannels()) {
-          const u = await findUserByChannelName(p);
-          if (u) await refreshPrefixRealtime(u);
-        }
+        await refreshCreatedPrefixes();
       } else {
         await processPrefix(name, cfg.autoRefillEnabled, cfg.processBatchSize);
       }
