@@ -224,11 +224,10 @@ export async function createChannelFromNextBatch(
   const cfg = await getConfig();
   const eff = effectiveUserLimit(user, cfg);
 
-  // —— 仅高优先级模式：三种入口区别对待 ——
-  // - 直接上传(forceNormalPriority)：**不占用**稀缺高优先级名额，直接建**普通(优先级5)**渠道立即上传；
-  //   跳过下面的名额门控（优先级在后面强制为 DEMOTED_PRIORITY）。
+  // —— 仅高优先级模式：入口区别对待 ——
   // - 定时任务(viaScheduler)：建高优先级(优先级6)渠道，受名额门控 + 公平轮转。
-  // - 其它手动路径（如「上传一批」）：不建，入池排队，由定时任务公平分配 → 返回 waitingSlot。
+  // - 手动路径（「上传一批」/「直接上传」）：不抢名额，入池排队，由定时任务在各用户间公平分配 → waitingSlot。
+  // - 强制普通(forceNormalPriority)：跳过门控，直接建普通(优先级5)渠道（当前无调用方，作为保留能力）。
   if (cfg.onlyHighPriorityEnabled && !opts.forceNormalPriority) {
     if (!opts.viaScheduler) {
       const { pending, uploaded } = await poolCounts(prefix);
@@ -236,7 +235,7 @@ export async function createChannelFromNextBatch(
         created: false,
         waitingSlot: true,
         waitingMessage:
-          "仅高优先级模式：高优先级渠道由定时任务在各用户间公平分配，key 已在本地库排队（如需立即上传请用「直接上传」，将建普通渠道）",
+          "仅高优先级模式：高优先级渠道由定时任务在各用户间公平分配，key 已在本地库排队，等待名额回收后自动创建",
         poolPending: pending,
         poolUploaded: uploaded,
         platformKeyCount: null,
@@ -612,8 +611,9 @@ export interface DirectUploadResult {
  * 直接上传：先把本批 key 落本地池去重，再把池里的 pending **一次性清空**——
  * 按管理员「聚合 key 数量」(uploadBatchSize) 拆分成多个渠道，尾批不足一整批也照建（少量上传）。
  * 与「提交上传」（只落池、等引擎/手动按钮）区别在于立即建完。
- * 优先级：直接上传建的**一律是普通(优先级5)渠道**（任何模式下都不占用稀缺高优先级名额）；
- * 高优先级(优先级6)渠道只能经「提交上传」入池、由定时/手动路径按配额创建。
+ * 优先级：与「上传一批」一致按配额判定——**有空闲高优先级名额就建优先级6渠道**，
+ * 全局/用户配额已满或用户被禁高优先级才降到普通(优先级5)。
+ * （仅高优先级模式下，直接上传同样受名额门控：无空闲名额时 key 留池、等定时任务公平分配。）
  */
 export async function directUploadKeys(
   user: User,
@@ -632,17 +632,15 @@ export async function directUploadKeys(
   const { added } = await addKeysToPool(prefix, cleanKeys);
 
   // 直接上传 = 立即传完：不设本轮 key 数上限（安全阀 MAX_CHANNELS_PER_DRAIN 兜底），
-  // 每渠道按「聚合 key 数量」拆分，尾批不足一整批也照建；一律建普通(优先级5)渠道，
-  // 不占用稀缺高优先级名额（上传限速仍生效，触发后剩余留池由引擎续传）。
-  const drain = await createChannelsDrain(user, Number.MAX_SAFE_INTEGER, {
-    forceNormalPriority: true,
-  });
+  // 每渠道按「聚合 key 数量」拆分，尾批不足一整批也照建；优先级按配额判定
+  //（有空闲高优先级名额即建优先级6，否则普通优先级5）；上传限速仍生效，触发后剩余留池由引擎续传。
+  const drain = await createChannelsDrain(user, Number.MAX_SAFE_INTEGER);
 
   await addLog({
     level: "info",
     actor: user.username,
     channelName: prefix,
-    message: `直接上传：新录入 ${added} 个，建 ${drain.createdChannels} 个普通(优先级5)新渠道共传 ${drain.pushed} 个 key（剩余待上传 ${drain.poolPending}）${
+    message: `直接上传：新录入 ${added} 个，建 ${drain.createdChannels} 个新渠道共传 ${drain.pushed} 个 key（剩余待上传 ${drain.poolPending}）${
       drain.limited ? "，已触发上传限速，剩余等窗口滚动自动续传" : ""
     }`,
   });
