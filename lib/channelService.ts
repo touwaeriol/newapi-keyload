@@ -36,7 +36,6 @@ import {
   getCreatedChannelByChannelId,
   getUploadedKeyCount,
   listChannelsAbovePriority,
-  listRecentCreatedChannels,
   listCreatedChannels,
   markPoolUploaded,
   poolCounts,
@@ -971,29 +970,26 @@ export async function demoteChannelManually(
   return { channelName: rec.channelName, from: rec.priority, to: DEMOTED_PRIORITY };
 }
 
-/** 对账每轮扫描的最近渠道数（有界，控制 naci 请求量）。naci 优先级6配额小、总被最新渠道占用，覆盖最近这批即可。 */
-const RECONCILE_RECENT_LIMIT = 80;
 /** 对账逐个读 naci 详情间的节流（毫秒），避免触发 429。 */
-const RECONCILE_REQ_DELAY_MS = 150;
+const RECONCILE_REQ_DELAY_MS = 300;
 
 /**
- * 优先级对账：把本地 created_channels.priority **双向同步为 naci 的真实优先级**。
+ * 优先级对账：**只检查本地记录为优先级 6 的渠道**（我们建 6 时已记录在
+ * created_channels.priority，降级/手动回退时同步更新——这份记录就是唯一枚举源），
+ * 逐个用 `getChannel(id)` 详情读 naci 真实优先级，若 naci 已（静默）降到 5 则同步本地，
+ * 释放被「假6」占用的配额。
  *
- * 背景：本地优先级是「建渠道时写一次」的缓存，之后只有降级任务处理退化渠道时才更新，会**双向漂移**：
- * - naci 静默把优先级6降到5（配额满/服务端）→ 本地留「假6」，虚增 countChannelsAtPriority(6) 卡死配额；
- * - 建渠道时本地记5（当时本地计数显示满）但 naci 实际按6建 → 本地「假5」，降级任务用
- *   `listChannelsAbovePriority(5)`（本地>5）**看不到**它 → 该优先级6渠道即使自动禁用也永不降级。
- *
- * 关键：naci 的**列表端点会漏渠道**（实测新建的部分渠道 GET 列表拿不到，但按 id GET 详情正常），
- * 因此对账**以本地渠道为枚举源**、逐个用 `getChannel(id)` 详情读 naci 真实优先级（可靠），不一致则同步本地。
- * 全量 getChannel 太重，故只扫**最近 RECONCILE_RECENT_LIMIT 个**渠道（优先级6只可能在最新这批）。返回同步条数。
+ * 之前每轮扫最近 80 个渠道找双向漂移，naci 请求量太大（1 分钟一轮 → 持续 429）。
+ * 现在每轮请求数 ≤ priority6Limit（个位数）。代价：本地记 5 但 naci 实际 6 的「假5」
+ * 不再被自动发现——该方向漂移极少（建渠道以我们下发的优先级为准），发现后可用
+ * 「回退P5」按钮手动纠正。返回同步条数。
  */
 export async function reconcileTrackedPriorities(): Promise<number> {
-  const recent = await listRecentCreatedChannels(RECONCILE_RECENT_LIMIT);
-  if (recent.length === 0) return 0;
+  const tracked = await listChannelsAbovePriority(DEMOTED_PRIORITY);
+  if (tracked.length === 0) return 0;
   let fixed = 0;
   const affected = new Set<string>();
-  for (const c of recent) {
+  for (const c of tracked) {
     if (c.channelId == null) continue;
     let naciPriority: number | null = null;
     try {
