@@ -362,18 +362,20 @@ export async function createChannelFromNextBatch(
       desiredPriority = DEMOTED_PRIORITY;
       demoteReason = "直接上传（仅高优先级模式下建普通渠道，不占用高优先级名额）";
     }
-  } else if (user.allowHighPriority === false) {
-    desiredPriority = DEMOTED_PRIORITY;
-    demoteReason = "该用户被禁用高优先级";
   } else {
-    // 普通模式：优先级6上限按**每用户**计——每个用户各自最多 N 个优先级6渠道（超出降级到5），
-    // N = 用户独立配额(highPriorityLimit) ?? 全局默认(priority6Limit)。不再用「所有用户合计」的全局门控。
-    // 注：naci 侧仍可能有自己的优先级6全局硬上限，撞到时由下方兜底 catch 自动降级到5。
-    const userP6 = await countChannelsAtPriorityForPrefix(prefix, FIXED_PRIORITY);
-    const perUserLimit = user.highPriorityLimit ?? cfg.priority6Limit;
-    if (userP6 >= perUserLimit) {
+    const priority6Count = await countChannelsAtPriority(FIXED_PRIORITY);
+    if (user.allowHighPriority === false) {
       desiredPriority = DEMOTED_PRIORITY;
-      demoteReason = `该用户优先级 ${FIXED_PRIORITY} 配额已满（${userP6}/${perUserLimit}）`;
+      demoteReason = "该用户被禁用高优先级";
+    } else if (priority6Count >= cfg.priority6Limit) {
+      desiredPriority = DEMOTED_PRIORITY;
+      demoteReason = `全局优先级 ${FIXED_PRIORITY} 已满（${priority6Count}/${cfg.priority6Limit}）`;
+    } else if (user.highPriorityLimit != null) {
+      const userP6 = await countChannelsAtPriorityForPrefix(prefix, FIXED_PRIORITY);
+      if (userP6 >= user.highPriorityLimit) {
+        desiredPriority = DEMOTED_PRIORITY;
+        demoteReason = `该用户独立优先级 ${FIXED_PRIORITY} 配额已满（${userP6}/${user.highPriorityLimit}）`;
+      }
     }
   }
 
@@ -1087,8 +1089,7 @@ export async function resolveMyChannel(user: User) {
     onlyHighPriority: cfg.onlyHighPriorityEnabled,
     highPriority: {
       allowed: user.allowHighPriority !== false,
-      // 普通模式的每用户高优先级上限 = 用户独立配额 ?? 全局默认(priority6Limit)；始终有值便于展示「我 X/上限」
-      limit: user.highPriorityLimit ?? hpGlobalLimit,
+      limit: user.highPriorityLimit ?? null,
       used: highPriorityUsed,
       globalUsed: hpGlobalUsed,
       globalLimit: hpGlobalLimit,

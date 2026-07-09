@@ -413,28 +413,19 @@ function MiniStat({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-/**
- * 高优先级徽章色：满 → 红（无法再建优先级6）；否则蓝。
- * 仅高优先级模式看**全局**名额；普通模式看**本用户**配额（每用户上限）。
- */
-function highPriorityTone(
-  hp: {
-    limit: number | null;
-    used: number;
-    globalUsed?: number;
-    globalLimit?: number;
-  },
-  onlyHigh?: boolean
-): "blue" | "rose" {
-  if (onlyHigh) {
-    const globalFull =
-      hp.globalLimit != null &&
-      hp.globalUsed != null &&
-      hp.globalUsed >= hp.globalLimit;
-    return globalFull ? "rose" : "blue";
-  }
+/** 高优先级徽章色：全局满 或 用户独立配额满 → 红（无法再建优先级6）；否则蓝。 */
+function highPriorityTone(hp: {
+  limit: number | null;
+  used: number;
+  globalUsed?: number;
+  globalLimit?: number;
+}): "blue" | "rose" {
+  const globalFull =
+    hp.globalLimit != null &&
+    hp.globalUsed != null &&
+    hp.globalUsed >= hp.globalLimit;
   const userFull = hp.limit != null && hp.used >= hp.limit;
-  return userFull ? "rose" : "blue";
+  return globalFull || userFull ? "rose" : "blue";
 }
 
 /**
@@ -471,10 +462,9 @@ function UploadProgress({ channel }: { channel: ChannelStatus }) {
             (!hp.allowed ? (
               <Badge tone="slate">不可用高优先级</Badge>
             ) : (
-              <Badge tone={highPriorityTone(hp, channel.onlyHighPriority)}>
-                {channel.onlyHighPriority
-                  ? `高优先级 全局 ${hp.globalUsed ?? "?"}/${hp.globalLimit ?? "?"} · 我 ${hp.used}`
-                  : `高优先级 我 ${hp.used}/${hp.limit ?? "?"}`}
+              <Badge tone={highPriorityTone(hp)}>
+                高优先级 全局 {hp.globalUsed ?? "?"}/{hp.globalLimit ?? "?"} · 我{" "}
+                {hp.limit != null ? `${hp.used}/${hp.limit}` : hp.used}
               </Badge>
             ))}
           {limit != null &&
