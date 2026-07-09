@@ -45,6 +45,7 @@ import {
   recordCreatedChannelSites,
   recordUploadedKeys,
   releaseClaim,
+  setChannelUsage,
   sumChannelUsedQuotaByPrefix,
   updateCreatedChannelPriority,
   updateUserKeyStats,
@@ -1112,6 +1113,71 @@ export async function refreshChannelUsage(): Promise<number> {
     }
   }
   return updated;
+}
+
+/** 手动同步用量的最小间隔（ms）：防止用户狂点把 naci 打爆。 */
+const MANUAL_USAGE_SYNC_COOLDOWN_MS = 8_000;
+/** 前缀 → 上次手动同步时间戳(ms)，进程内冷却。 */
+function manualUsageSyncStore(): Map<string, number> {
+  const g = globalThis as unknown as { __keyloadUsageSync?: Map<string, number> };
+  if (!g.__keyloadUsageSync) g.__keyloadUsageSync = new Map();
+  return g.__keyloadUsageSync;
+}
+
+export interface SyncUsageResult {
+  channelCount: number; // 成功刷新的渠道数
+  totalUsedQuota: number;
+  totalUsedAmount: number;
+}
+
+/**
+ * 用户手动同步：**立即**对某前缀所有已建渠道实时拉一次 used-quota、写回缓存并重算聚合。
+ * 不受后台「自动最多刷 N 次」上限约束（不消耗计数）。带进程内冷却，避免狂点打爆 naci。
+ * 无已建渠道返回全 0；冷却期内抛出友好错误。
+ */
+export async function syncPrefixUsage(user: User): Promise<SyncUsageResult> {
+  const prefix = user.channelName.trim();
+  if (!prefix) return { channelCount: 0, totalUsedQuota: 0, totalUsedAmount: 0 };
+
+  const store = manualUsageSyncStore();
+  const last = store.get(prefix) ?? 0;
+  const now = Date.now();
+  if (now - last < MANUAL_USAGE_SYNC_COOLDOWN_MS) {
+    throw new Error("同步过于频繁，请稍候几秒再试");
+  }
+  store.set(prefix, now);
+
+  const created = await listCreatedChannels(prefix);
+  const ids = created
+    .map((c) => c.channelId)
+    .filter((id): id is number => typeof id === "number");
+  if (ids.length === 0) {
+    return { channelCount: 0, totalUsedQuota: 0, totalUsedAmount: 0 };
+  }
+
+  let channelCount = 0;
+  for (let i = 0; i < ids.length; i += USAGE_QUOTA_CHUNK) {
+    const chunk = ids.slice(i, i + USAGE_QUOTA_CHUNK);
+    const usageMap = await getChannelsUsedQuota(chunk); // 手动触发：失败直接抛给调用方提示
+    for (const id of chunk) {
+      const us = usageMap.get(id);
+      if (!us) continue;
+      await setChannelUsage(id, us.usedQuota);
+      channelCount += 1;
+    }
+    if (i + USAGE_QUOTA_CHUNK < ids.length) {
+      await new Promise((r) => setTimeout(r, USAGE_CHUNK_DELAY_MS));
+    }
+  }
+
+  const totalUsedQuota = await sumChannelUsedQuotaByPrefix(prefix);
+  await updateUserUsedQuota(user.id, totalUsedQuota);
+  invalidateChannelCache(prefix);
+  return {
+    channelCount,
+    totalUsedQuota,
+    totalUsedAmount: totalUsedQuota / QUOTA_PER_USD,
+  };
 }
 
 /**

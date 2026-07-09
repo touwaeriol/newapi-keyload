@@ -140,6 +140,22 @@ export function UserPanel({ user }: { user: SafeUser }) {
     [toast, fetchChannel]
   );
 
+  // 手动同步最新用量：立即实时拉 used-quota 刷新缓存（不受后台自动刷新次数上限约束）
+  const handleSyncUsage = useCallback(async () => {
+    try {
+      const res = await apiFetch<{
+        channelCount: number;
+        totalUsedAmount: number;
+      }>("/api/my/sync-usage", { method: "POST" });
+      toast.success(
+        `已同步 ${res.channelCount} 个渠道用量，合计 $${res.totalUsedAmount.toFixed(2)}`
+      );
+      fetchChannel(true);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "同步用量失败");
+    }
+  }, [toast, fetchChannel]);
+
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       <ChannelCard
@@ -149,6 +165,7 @@ export function UserPanel({ user }: { user: SafeUser }) {
         onRefresh={() => fetchChannel(false)}
         onSiteToggle={handleSiteToggle}
         onDemote={handleDemote}
+        onSyncUsage={handleSyncUsage}
       />
       <UploadCard
         onUploaded={() => fetchChannel(false)}
@@ -168,6 +185,7 @@ function ChannelCard({
   onRefresh,
   onSiteToggle,
   onDemote,
+  onSyncUsage,
 }: {
   user: SafeUser;
   channel: ChannelStatus | null;
@@ -179,9 +197,11 @@ function ChannelCard({
     on: boolean
   ) => Promise<void>;
   onDemote: (channelId: number) => Promise<void>;
+  onSyncUsage: () => Promise<void>;
 }) {
   const toast = useToast();
   const [creating, setCreating] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const manualDisabled = channel?.manualUploadEnabled === false;
   const onlyHigh = channel?.onlyHighPriority === true;
 
@@ -234,6 +254,21 @@ function ChannelCard({
             }
           >
             上传一批（新建渠道）
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={async () => {
+              setSyncing(true);
+              try {
+                await onSyncUsage();
+              } finally {
+                setSyncing(false);
+              }
+            }}
+            loading={syncing}
+            title="立即实时拉取所有渠道的最新用量（不受后台自动刷新次数上限约束）"
+          >
+            同步用量
           </Button>
           <Button variant="secondary" onClick={onRefresh} loading={loading}>
             刷新

@@ -1141,6 +1141,23 @@ export async function recordChannelUsage(
   );
 }
 
+/**
+ * 写回单个渠道的用量缓存但**不动**刷新计数（用户手动同步用）：
+ * 手动同步是按需、单前缀触发，不受「自动最多刷 N 次」上限约束，也不消耗该配额。
+ */
+export async function setChannelUsage(
+  channelId: number,
+  usedQuota: number
+): Promise<void> {
+  const pool = await ensureReady();
+  await pool.query(
+    `UPDATE created_channels
+        SET used_quota = $2, usage_updated_at = now()
+      WHERE channel_id = $1`,
+    [channelId, Math.max(0, Math.round(usedQuota))]
+  );
+}
+
 /** 汇总某前缀所有已建渠道的缓存用量（used_quota 之和；供按用户聚合统计）。 */
 export async function sumChannelUsedQuotaByPrefix(
   prefix: string
