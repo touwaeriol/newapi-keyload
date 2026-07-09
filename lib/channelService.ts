@@ -911,6 +911,8 @@ export async function demoteAllDegradedChannels(): Promise<number> {
     if (!channelExhausted && !siteDegraded) continue;
 
     try {
+      // 逐渠道间隔 600ms：setChannelPriority 是 GET+PUT 两次请求，连发易触发 naci 429
+      if (demoted > 0) await new Promise((r) => setTimeout(r, 600));
       await setChannelPriority(c.channelId as number, DEMOTED_PRIORITY);
       await updateCreatedChannelPriority(c.channelId as number, DEMOTED_PRIORITY);
       demoted += 1;

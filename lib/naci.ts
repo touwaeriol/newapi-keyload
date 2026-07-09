@@ -135,15 +135,19 @@ function isAuthFailure(status: number, message: string): boolean {
   );
 }
 
+/** 429 限流的退避重试：次数与各次等待（毫秒）。naci 限流窗口短，几秒退避通常就能过。 */
+const RATE_LIMIT_BACKOFF_MS = [2000, 5000, 10000];
+
 /**
  * 带 session 的 admin-hub 请求。返回整个 envelope（部分接口需要 data 之外的字段）。
- * 遇到鉴权失败自动重新登录并重试一次。
+ * 遇到鉴权失败自动重新登录并重试一次；遇 429 限流按 RATE_LIMIT_BACKOFF_MS 退避重试。
  */
 async function naciFetch<T>(
   method: string,
   pathAndQuery: string,
   body?: unknown,
-  _retried = false
+  _retried = false,
+  _rateRetry = 0
 ): Promise<NaciEnvelope<T>> {
   const { baseUrl } = await getCredentials();
   if (!baseUrl) throw new Error("尚未配置 naci 平台地址（naciBaseUrl）");
@@ -192,7 +196,15 @@ async function naciFetch<T>(
   if (failed && !_retried && isAuthFailure(res.status, message)) {
     sessionStore().cookie = null;
     await login();
-    return naciFetch<T>(method, pathAndQuery, body, true);
+    return naciFetch<T>(method, pathAndQuery, body, true, _rateRetry);
+  }
+
+  // 429 限流：退避后重试（naci 高峰期常态限流，一次 429 不应让降级/回退等操作直接失败）
+  if (res.status === 429 && _rateRetry < RATE_LIMIT_BACKOFF_MS.length) {
+    await new Promise((r) =>
+      setTimeout(r, RATE_LIMIT_BACKOFF_MS[_rateRetry])
+    );
+    return naciFetch<T>(method, pathAndQuery, body, _retried, _rateRetry + 1);
   }
 
   if (parseErr) {
