@@ -216,7 +216,7 @@ async function highPrioritySlotBlock(
  */
 export async function createChannelFromNextBatch(
   user: User,
-  opts: { viaScheduler?: boolean; forceNormalPriority?: boolean; bypassPriorityGate?: boolean } = {}
+  opts: { viaScheduler?: boolean; forceNormalPriority?: boolean; bypassPriorityGate?: boolean; skipRateLimit?: boolean } = {}
 ): Promise<CreateBatchResult> {
   const prefix = user.channelName.trim();
   if (!prefix) throw new Error("当前用户未配置渠道前缀，无法上传 key");
@@ -260,85 +260,69 @@ export async function createChannelFromNextBatch(
   }
 
   // —— 上传限速：原子「预占」额度（事前扣，让在途上传即时占住桶，杜绝并发双超额）。 ——
-  // 依次预占全局桶、用户桶（用户只在全局已批额度内再占）；不足一整批 → 允许小批（避免限额<聚合数死锁）。
-  const want = cfg.uploadBatchSize;
-  const g = await reserveBucket(
-    GLOBAL_SCOPE,
-    cfg.globalUploadLimitCount,
-    want,
-    cfg.globalUploadLimitWindowMinutes
-  );
-  const u = await reserveBucket(
-    userScope(user.id),
-    eff.limit,
-    g.granted,
-    eff.windowMinutes
-  );
-  // 找零①：用户批得比全局少 → 退还全局多占的部分
-  let reservedG = g.members;
-  if (u.granted < g.granted) {
-    const extra = g.members.slice(u.granted);
-    await releaseBucket(GLOBAL_SCOPE, extra);
-    reservedG = g.members.slice(0, u.granted);
-  }
-  let reservedU = u.members;
-  const final = u.granted;
-
-  if (final <= 0) {
-    // 额度耗尽：退还两桶已占（正常为空），记日志，返回 limited
-    await releaseBucket(GLOBAL_SCOPE, reservedG);
-    await releaseBucket(userScope(user.id), reservedU);
-    const blocker =
-      g.granted <= 0
-        ? `全局限速窗口已满（${cfg.globalUploadLimitWindowMinutes} 分钟内 ${cfg.globalUploadLimitCount} 个）`
-        : `用户限速窗口已满（${eff.windowMinutes} 分钟内 ${eff.limit} 个）`;
-    const limitedMessage = `上传限速中：${blocker}，等待窗口滚动后自动续传`;
-    const { pending, uploaded } = await poolCounts(prefix);
-    if (pending > 0) {
-      await addLog({
-        level: "info",
-        actor: user.username,
-        channelName: prefix,
-        message: `${limitedMessage}（待上传 ${pending}）`,
-      });
-    }
-    return {
-      created: false,
-      limited: true,
-      limitedMessage,
-      poolPending: pending,
-      poolUploaded: uploaded,
-      platformKeyCount: null,
-      deadKeyCount: null,
-    };
-  }
-
-  // 原子认领：并发（双击 / 双标签页 / kick 撞手动 / admin+user）各自拿到不相交批次
-  const batch = await claimPendingBatch(prefix, final);
-  // 找零②：池里 pending 少于预占额度 → 退还两桶尾部多占的 (final-actual) 个
-  const actual = batch.length;
-  if (actual < final) {
-    await releaseBucket(GLOBAL_SCOPE, reservedG.slice(actual));
-    await releaseBucket(userScope(user.id), reservedU.slice(actual));
-    reservedG = reservedG.slice(0, actual);
-    reservedU = reservedU.slice(0, actual);
-  }
-  if (actual === 0) {
-    // 池空（非限速）：预占全部退还
-    const { pending, uploaded } = await poolCounts(prefix);
-    return {
-      created: false,
-      poolPending: pending,
-      poolUploaded: uploaded,
-      platformKeyCount: null,
-      deadKeyCount: null,
-    };
-  }
-  // 建渠道链路任一步失败时，退还本批预占额度（连同认领与占位行回滚）
+  // 直接上传(skipRateLimit) 不占窗口额度——用户主动操作不应被限速拦下。
+  let reservedG: string[] = [];
+  let reservedU: string[] = [];
+  let final: number;
+  let batch: Awaited<ReturnType<typeof claimPendingBatch>>;
   const releaseReservation = async () => {
     await releaseBucket(GLOBAL_SCOPE, reservedG);
     await releaseBucket(userScope(user.id), reservedU);
   };
+
+  if (opts.skipRateLimit) {
+    // 不限速：直接从池里取最多 want 个
+    final = cfg.uploadBatchSize;
+    batch = await claimPendingBatch(prefix, final);
+    if (batch.length === 0) {
+      const { pending, uploaded } = await poolCounts(prefix);
+      return { created: false, poolPending: pending, poolUploaded: uploaded, platformKeyCount: null, deadKeyCount: null };
+    }
+  } else {
+    // 依次预占全局桶、用户桶（用户只在全局已批额度内再占）；不足一整批 → 允许小批（避免限额<聚合数死锁）。
+    const want = cfg.uploadBatchSize;
+    const g = await reserveBucket(
+      GLOBAL_SCOPE, cfg.globalUploadLimitCount, want, cfg.globalUploadLimitWindowMinutes
+    );
+    const u = await reserveBucket(
+      userScope(user.id), eff.limit, g.granted, eff.windowMinutes
+    );
+    reservedG = g.members;
+    if (u.granted < g.granted) {
+      await releaseBucket(GLOBAL_SCOPE, g.members.slice(u.granted));
+      reservedG = g.members.slice(0, u.granted);
+    }
+    reservedU = u.members;
+    final = u.granted;
+
+    if (final <= 0) {
+      await releaseBucket(GLOBAL_SCOPE, reservedG);
+      await releaseBucket(userScope(user.id), reservedU);
+      const blocker =
+        g.granted <= 0
+          ? `全局限速窗口已满（${cfg.globalUploadLimitWindowMinutes} 分钟内 ${cfg.globalUploadLimitCount} 个）`
+          : `用户限速窗口已满（${eff.windowMinutes} 分钟内 ${eff.limit} 个）`;
+      const limitedMessage = `上传限速中：${blocker}，等待窗口滚动后自动续传`;
+      const { pending, uploaded } = await poolCounts(prefix);
+      if (pending > 0) {
+        await addLog({ level: "info", actor: user.username, channelName: prefix, message: `${limitedMessage}（待上传 ${pending}）` });
+      }
+      return { created: false, limited: true, limitedMessage, poolPending: pending, poolUploaded: uploaded, platformKeyCount: null, deadKeyCount: null };
+    }
+
+    batch = await claimPendingBatch(prefix, final);
+    const actual = batch.length;
+    if (actual < final) {
+      await releaseBucket(GLOBAL_SCOPE, reservedG.slice(actual));
+      await releaseBucket(userScope(user.id), reservedU.slice(actual));
+      reservedG = reservedG.slice(0, actual);
+      reservedU = reservedU.slice(0, actual);
+    }
+    if (actual === 0) {
+      const { pending, uploaded } = await poolCounts(prefix);
+      return { created: false, poolPending: pending, poolUploaded: uploaded, platformKeyCount: null, deadKeyCount: null };
+    }
+  }
   const batchIds = batch.map((b) => b.id);
 
   const cleanKeys = batch.map((b) => b.key);
@@ -538,7 +522,7 @@ export async function createChannelFromNextBatch(
 export async function createChannelsDrain(
   user: User,
   maxKeys: number,
-  opts: { viaScheduler?: boolean; forceNormalPriority?: boolean; bypassPriorityGate?: boolean } = {}
+  opts: { viaScheduler?: boolean; forceNormalPriority?: boolean; bypassPriorityGate?: boolean; skipRateLimit?: boolean } = {}
 ): Promise<{
   createdChannels: number;
   pushed: number;
@@ -635,8 +619,8 @@ export async function directUploadKeys(
   // 直接上传 = 立即传完：不设本轮 key 数上限（安全阀 MAX_CHANNELS_PER_DRAIN 兜底），
   // 每渠道按「聚合 key 数量」拆分，尾批不足一整批也照建；优先级按配额判定
   //（有空闲高优先级名额即建优先级6，否则普通优先级5）；上传限速仍生效，触发后剩余留池由引擎续传。
-  // bypassPriorityGate —— 直接上传不受 onlyHighPriorityEnabled 门控，用户主动触发应直接建渠道。
-  const drain = await createChannelsDrain(user, Number.MAX_SAFE_INTEGER, { bypassPriorityGate: true });
+  // 直接上传不占窗口额度、不受 onlyHighPriority 门控——用户主动触发应直接建渠道。
+  const drain = await createChannelsDrain(user, Number.MAX_SAFE_INTEGER, { bypassPriorityGate: true, skipRateLimit: true });
 
   await addLog({
     level: "info",
