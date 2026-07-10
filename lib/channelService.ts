@@ -216,7 +216,7 @@ async function highPrioritySlotBlock(
  */
 export async function createChannelFromNextBatch(
   user: User,
-  opts: { viaScheduler?: boolean; forceNormalPriority?: boolean } = {}
+  opts: { viaScheduler?: boolean; forceNormalPriority?: boolean; bypassPriorityGate?: boolean } = {}
 ): Promise<CreateBatchResult> {
   const prefix = user.channelName.trim();
   if (!prefix) throw new Error("当前用户未配置渠道前缀，无法上传 key");
@@ -226,9 +226,10 @@ export async function createChannelFromNextBatch(
 
   // —— 仅高优先级模式：入口区别对待 ——
   // - 定时任务(viaScheduler)：建高优先级(优先级6)渠道，受名额门控 + 公平轮转。
-  // - 手动路径（「上传一批」/「直接上传」）：不抢名额，入池排队，由定时任务在各用户间公平分配 → waitingSlot。
+  // - 手动路径（「上传一批」）：不抢名额，入池排队，由定时任务在各用户间公平分配 → waitingSlot。
+  // - 直接上传(bypassPriorityGate)：不受 onlyHighPriorityEnabled 门控，正常优先级逻辑（P6有空就6，满则5）。
   // - 强制普通(forceNormalPriority)：跳过门控，直接建普通(优先级5)渠道（当前无调用方，作为保留能力）。
-  if (cfg.onlyHighPriorityEnabled && !opts.forceNormalPriority) {
+  if (cfg.onlyHighPriorityEnabled && !opts.forceNormalPriority && !opts.bypassPriorityGate) {
     if (!opts.viaScheduler) {
       const { pending, uploaded } = await poolCounts(prefix);
       return {
@@ -363,7 +364,7 @@ export async function createChannelFromNextBatch(
     // 直接上传：**任何模式**下都不占用稀缺的高优先级名额，直接建普通(优先级5)渠道立即上传。
     desiredPriority = DEMOTED_PRIORITY;
     demoteReason = "直接上传（不占用高优先级名额，建普通渠道）";
-  } else if (cfg.onlyHighPriorityEnabled) {
+  } else if (cfg.onlyHighPriorityEnabled && !opts.bypassPriorityGate) {
     // 仅高优先级模式的定时任务路径：已在入口门控过名额，此处保持优先级6，不走降级。
   } else {
     const priority6Count = await countChannelsAtPriority(FIXED_PRIORITY);
@@ -406,7 +407,7 @@ export async function createChannelFromNextBatch(
       }
     } catch (err) {
       if (desiredPriority === FIXED_PRIORITY && isPriorityQuotaError(err)) {
-        if (cfg.onlyHighPriorityEnabled) {
+        if (cfg.onlyHighPriorityEnabled && !opts.bypassPriorityGate) {
           // 仅高优先级模式：naci 报优先级6已满（与本地计数竞态）→ **不回退到5**，回滚并留池等回收。
           await releaseClaim(batchIds);
           await deleteCreatedChannel(alloc.id);
@@ -537,7 +538,7 @@ export async function createChannelFromNextBatch(
 export async function createChannelsDrain(
   user: User,
   maxKeys: number,
-  opts: { viaScheduler?: boolean; forceNormalPriority?: boolean } = {}
+  opts: { viaScheduler?: boolean; forceNormalPriority?: boolean; bypassPriorityGate?: boolean } = {}
 ): Promise<{
   createdChannels: number;
   pushed: number;
@@ -634,7 +635,8 @@ export async function directUploadKeys(
   // 直接上传 = 立即传完：不设本轮 key 数上限（安全阀 MAX_CHANNELS_PER_DRAIN 兜底），
   // 每渠道按「聚合 key 数量」拆分，尾批不足一整批也照建；优先级按配额判定
   //（有空闲高优先级名额即建优先级6，否则普通优先级5）；上传限速仍生效，触发后剩余留池由引擎续传。
-  const drain = await createChannelsDrain(user, Number.MAX_SAFE_INTEGER);
+  // bypassPriorityGate —— 直接上传不受 onlyHighPriorityEnabled 门控，用户主动触发应直接建渠道。
+  const drain = await createChannelsDrain(user, Number.MAX_SAFE_INTEGER, { bypassPriorityGate: true });
 
   await addLog({
     level: "info",
