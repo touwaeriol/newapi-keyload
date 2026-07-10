@@ -268,6 +268,89 @@ export async function listChannels(
   return { items: arr.map(normalizeChannel), pageSize };
 }
 
+// —— 关键词搜索（admin-hub 列表的 `p=&page_size=&keyword=` 分页变体，data 为 {items,total}） ——
+
+/** 搜索结果单项：列表原始字段 + 从 channel_json 解出的 priority。 */
+export interface ChannelSearchItem {
+  id: number;
+  name: string;
+  priority: number | null;
+  /** 列表自带的累计 used_quota（可能滞后；实时值用 getChannelsUsedQuota 补，失败时拿它兜底） */
+  usedQuota: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function toSearchItem(raw: Record<string, unknown>): ChannelSearchItem {
+  let priority: number | null = null;
+  if (typeof raw.channel_json === "string") {
+    try {
+      const inner = JSON.parse(raw.channel_json) as { priority?: unknown };
+      if (typeof inner?.priority === "number") priority = inner.priority;
+    } catch {
+      // channel_json 解析失败 → priority 未知
+    }
+  }
+  return {
+    id: Number(raw.id),
+    name: String(raw.name ?? ""),
+    priority,
+    usedQuota: Number(raw.used_quota) || 0,
+    createdAt: String(raw.created_at ?? ""),
+    updatedAt: String(raw.updated_at ?? ""),
+  };
+}
+
+/** 关键词搜索单页（naci 按名称子串匹配）。走 naciFetch：session 复用 + 401 重登 + 429 退避。 */
+export async function searchChannelsPage(
+  keyword: string,
+  page: number,
+  pageSize: number
+): Promise<{ items: ChannelSearchItem[]; total: number }> {
+  const env = await naciFetch<{ items?: unknown; total?: unknown }>(
+    "GET",
+    `/api/admin-hub/channels/?p=${page}&page_size=${pageSize}&keyword=${encodeURIComponent(keyword)}`
+  );
+  const rawItems = Array.isArray(env.data?.items) ? env.data.items : [];
+  return {
+    items: rawItems
+      .filter((it): it is Record<string, unknown> => !!it && typeof it === "object")
+      .map(toSearchItem),
+    total: Number(env.data?.total) || 0,
+  };
+}
+
+/** 搜索全量翻页的每页条数 / 页间节流。 */
+const SEARCH_PAGE_SIZE = 500;
+const SEARCH_PAGE_DELAY_MS = 200;
+
+/**
+ * 关键词搜索**全量**（自动翻页拉完）。maxItems 为护栏：naci 报的 total 超过上限直接抛错
+ * （提示细化关键词），避免宽泛关键词（如 "07-10"）让单个请求翻几十页、拖垮 naci。
+ */
+export async function searchChannelsAll(
+  keyword: string,
+  maxItems: number
+): Promise<{ items: ChannelSearchItem[]; total: number }> {
+  const items: ChannelSearchItem[] = [];
+  let page = 1;
+  let total = 0;
+  while (true) {
+    const res = await searchChannelsPage(keyword, page, SEARCH_PAGE_SIZE);
+    total = res.total;
+    if (total > maxItems) {
+      throw new Error(
+        `搜索结果 ${total} 条超过上限 ${maxItems}，请使用更精确的关键词`
+      );
+    }
+    items.push(...res.items);
+    if (items.length >= total || res.items.length === 0) break;
+    page += 1;
+    await sleep(SEARCH_PAGE_DELAY_MS);
+  }
+  return { items, total };
+}
+
 /** 详情。 */
 export async function getChannel(id: number): Promise<NaciChannel> {
   const env = await naciFetch<AdminHubRawChannel>(
