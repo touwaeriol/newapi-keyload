@@ -3,7 +3,7 @@
 // 因此 channelService.ts 与所有 route 无需改动。
 import crypto from "crypto";
 import { Pool } from "pg";
-import { buildChannelName, DEFAULT_MODELS } from "./supplier";
+import { buildChannelName, DEFAULT_MODELS, todayTag } from "./supplier";
 import type { LogEntry, LogLevel, Role, SystemConfig, User } from "./types";
 
 // —— seed 默认值 ——
@@ -342,6 +342,32 @@ async function createTables(pool: Pool): Promise<void> {
   // usage_max_updates 次即冻结」机制：实时视图直接读该缓存，不再每次翻页都实时打 naci status-batch。
   await pool.query(
     `ALTER TABLE created_channels ADD COLUMN IF NOT EXISTS status_json jsonb`
+  );
+  // 日期标签（MM-DD）：渠道名 = 前缀-日期标签-序号，每个日期从 1 起计，不限位数。
+  // 兼容旧库：存量行填 "00-00"。旧 UNIQUE(prefix,suffix) 改为 (prefix,date_tag,suffix)。
+  await pool.query(
+    `ALTER TABLE created_channels ADD COLUMN IF NOT EXISTS date_tag text NOT NULL DEFAULT '00-00'`
+  );
+  await pool.query(`
+    DO $$
+    DECLARE
+      old_name text;
+    BEGIN
+      SELECT conname INTO old_name FROM pg_constraint
+       WHERE conrelid = 'created_channels'::regclass AND contype = 'u'
+         AND conkey @> ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'created_channels'::regclass AND attname = 'prefix')]
+         AND conkey @> ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'created_channels'::regclass AND attname = 'suffix')];
+      IF old_name IS NOT NULL THEN
+        EXECUTE format('ALTER TABLE created_channels DROP CONSTRAINT %I', old_name);
+      END IF;
+    END $$;
+  `);
+  await pool.query(
+    `ALTER TABLE created_channels ADD CONSTRAINT created_channels_prefix_date_suffix_key UNIQUE (prefix, date_tag, suffix)`
+  );
+  // 存量行回填日期：已有 created_at 的按创建时间取 MM-DD，无的保留默认 "00-00"。
+  await pool.query(
+    `UPDATE created_channels SET date_tag = to_char(created_at AT TIME ZONE 'Asia/Shanghai', 'MM-DD') WHERE date_tag = '00-00' AND created_at IS NOT NULL`
   );
   // 每个已建渠道在各站点的远程渠道 id / 名称（来自 naci 创建响应 publish_results）。
   // created_channel_id 引用 created_channels.id；渠道占位行删除时级联清理。
@@ -999,6 +1025,8 @@ export interface CreatedChannel {
   id: string;
   prefix: string;
   suffix: number;
+  /** 日期标签（MM-DD），每日期从 1 起计，不限位数。 */
+  dateTag: string;
   channelName: string;
   channelId: number | null;
   keyCount: number;
@@ -1017,6 +1045,7 @@ interface CreatedChannelRow {
   id: string;
   prefix: string;
   suffix: number;
+  date_tag: string;
   channel_name: string;
   channel_id: number | null;
   key_count: number;
@@ -1032,6 +1061,7 @@ function rowToCreatedChannel(r: CreatedChannelRow): CreatedChannel {
     id: String(r.id),
     prefix: r.prefix,
     suffix: Number(r.suffix),
+    dateTag: r.date_tag ?? "00-00",
     channelName: r.channel_name,
     channelId: r.channel_id === null ? null : Number(r.channel_id),
     keyCount: Number(r.key_count),
@@ -1045,33 +1075,36 @@ function rowToCreatedChannel(r: CreatedChannelRow): CreatedChannel {
 
 /**
  * 原子分配某前缀的下一个序号并占位插入一行（channel_id 暂空）：
- * 事务内 advisory lock 串行化同前缀的并发（手动按钮 / 引擎），取 MAX(suffix)+1，
- * 插入占位行返回 { id, suffix, channelName }。naci 创建成功后调 finalizeCreatedChannel 回填，
+ * 事务内 advisory lock 串行化同前缀+同日期的并发（手动按钮 / 引擎），取 MAX(suffix)+1，
+ * 插入占位行返回 { id, suffix, dateTag, channelName }。每个日期从 1 起计，不限位数。
+ * naci 创建成功后调 finalizeCreatedChannel 回填，
  * 失败则调 deleteCreatedChannel 删除占位行（释放该序号，避免留空洞）。
  */
 export async function allocateCreatedChannel(
   prefix: string
-): Promise<{ id: string; suffix: number; channelName: string }> {
+): Promise<{ id: string; suffix: number; dateTag: string; channelName: string }> {
   const name = prefix.trim();
   if (!name) throw new Error("前缀为空，无法分配渠道序号");
+  const dateTag = todayTag();
+  const lockKey = `${name}|${dateTag}`;
   const pool = await ensureReady();
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [name]);
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [lockKey]);
     const { rows } = await client.query<{ next: number }>(
-      "SELECT COALESCE(MAX(suffix),0)+1 AS next FROM created_channels WHERE prefix = $1",
-      [name]
+      "SELECT COALESCE(MAX(suffix),0)+1 AS next FROM created_channels WHERE prefix = $1 AND date_tag = $2",
+      [name, dateTag]
     );
     const suffix = Number(rows[0].next);
-    const channelName = buildChannelName(name, suffix);
+    const channelName = buildChannelName(name, dateTag, suffix);
     const ins = await client.query<{ id: string }>(
-      `INSERT INTO created_channels (prefix, suffix, channel_name, channel_id, key_count)
-       VALUES ($1,$2,$3,NULL,0) RETURNING id`,
-      [name, suffix, channelName]
+      `INSERT INTO created_channels (prefix, date_tag, suffix, channel_name, channel_id, key_count)
+       VALUES ($1,$2,$3,$4,NULL,0) RETURNING id`,
+      [name, dateTag, suffix, channelName]
     );
     await client.query("COMMIT");
-    return { id: String(ins.rows[0].id), suffix, channelName };
+    return { id: String(ins.rows[0].id), suffix, dateTag, channelName };
   } catch (err) {
     try {
       await client.query("ROLLBACK");

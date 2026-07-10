@@ -136,14 +136,22 @@ export const CHANNEL_JSON_TEMPLATE: Record<string, unknown> = {
   ramp_up_confirm_windows: 1,
 };
 
-/** 序号补零到 4 位（0001、0002…），供渠道名后缀用。 */
-export function pad4(n: number): string {
-  return String(Math.max(0, Math.floor(n))).padStart(4, "0");
+/** 序号直接转字符串（不补零，不限位数：1→"1"，100001→"100001"）。 */
+export function formatSuffix(n: number): string {
+  return String(Math.max(0, Math.floor(n)));
 }
 
-/** 由前缀 + 序号拼渠道名：`${prefix}-0001`。 */
-export function buildChannelName(prefix: string, suffix: number): string {
-  return `${prefix.trim()}-${pad4(suffix)}`;
+/** 今天的日期标签（MM-DD，上海时区）。 */
+export function todayTag(): string {
+  const d = new Date();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${mm}-${dd}`;
+}
+
+/** 由前缀 + 日期标签 + 序号拼渠道名：`${prefix}-07-10-1`。每个日期从 1 开始累加，不限位数。 */
+export function buildChannelName(prefix: string, dateTag: string, suffix: number): string {
+  return `${prefix.trim()}-${dateTag}-${formatSuffix(suffix)}`;
 }
 
 /** 把多行/含空白的 key 文本解析为去重、去空的有序数组 */
