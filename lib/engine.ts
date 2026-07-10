@@ -148,8 +148,11 @@ async function processPrefix(
   try {
     const user = await findUserByChannelName(prefix);
     if (!user) {
-      // 池里有 key 但没有绑定该前缀的用户：跳过（无法回写统计）
       recordResult(prefix, "empty", "无绑定用户，跳过");
+      return;
+    }
+    if (user.disabled) {
+      recordResult(prefix, "paused", "用户已禁用，跳过");
       return;
     }
 
@@ -251,8 +254,9 @@ async function distributeHighPriorityRoundRobin(): Promise<number> {
     [];
   for (const p of prefixes) {
     const user = await findUserByChannelName(p);
-    if (user) active.push({ prefix: p, user });
-    else recordResult(p, "empty", "无绑定用户，跳过");
+    if (user && !user.disabled) active.push({ prefix: p, user });
+    else if (!user) recordResult(p, "empty", "无绑定用户，跳过");
+    else recordResult(p, "paused", "用户已禁用，跳过");
   }
   let built = 0;
   let guard = 0;

@@ -34,6 +34,8 @@ export async function PUT(
       allowHighPriority?: boolean;
       /** 独立优先级6数量上限：数字=设定（≥0），显式 null=清除（仅受全局），未传=不动 */
       highPriorityLimit?: number | null;
+      /** 是否禁用该用户（禁用后仍可登录查看，但不能上传 key） */
+      disabled?: boolean;
     };
 
     if (typeof body.username === "string") {
@@ -99,6 +101,9 @@ export async function PUT(
     // 按用户高优先级配额
     if (typeof body.allowHighPriority === "boolean") {
       target.allowHighPriority = body.allowHighPriority;
+    }
+    if (typeof body.disabled === "boolean") {
+      target.disabled = body.disabled;
     }
     if ("highPriorityLimit" in body) {
       if (body.highPriorityLimit == null) {

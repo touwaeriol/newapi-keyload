@@ -27,6 +27,8 @@ export interface User {
   allowHighPriority?: boolean;
   /** 该用户可占用的优先级6渠道数量上限（全局6的子上限；NULL=不设独立上限，仅受全局约束） */
   highPriorityLimit?: number | null;
+  /** 是否禁用：禁用后用户仍可登录查看渠道/用量，但不能上传 key，定时任务也跳过该用户 */
+  disabled?: boolean;
   createdAt: string;
   updatedAt: string;
 }
