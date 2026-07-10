@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback, useMemo } from "react";
-import { apiFetch } from "@/lib/client";
+import { apiFetch, getStoredKey } from "@/lib/client";
 import { useToast } from "@/components/Toast";
 import { Badge, Button, Card, Spinner, TextInput } from "@/components/ui";
 
@@ -92,7 +92,24 @@ export function AdminChannelCard() {
     if (!kw) return;
     setDownloading(true);
     try {
-      window.open(`/api/admin/channels/download?keyword=${encodeURIComponent(kw)}`, "_blank");
+      const key = getStoredKey();
+      const res = await fetch(`/api/admin/channels/download?keyword=${encodeURIComponent(kw)}`, {
+        headers: key ? { "x-access-key": key } : {},
+      });
+      if (!res.ok) {
+        const msg = res.status === 401 ? "缺少访问密钥，请重新登录" : `下载失败 (HTTP ${res.status})`;
+        t.error(msg);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `渠道报表_${kw}_${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
     } catch (err) {
       t.error(`下载失败：${err instanceof Error ? err.message : String(err)}`);
     } finally {

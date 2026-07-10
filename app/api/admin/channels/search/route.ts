@@ -6,7 +6,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const QUOTA_PER_USD = 500000;
-const NAC_PAGE_SIZE = 200; // naci 每页条数
+const NAC_PAGE_SIZE = 500; // naci 每页条数
 const NAC_PAGE_DELAY_MS = 200; // 翻页节流
 const BATCH_CHUNK = 40; // used-quota/status-batch 分块
 const BATCH_DELAY_MS = 300;

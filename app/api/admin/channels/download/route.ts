@@ -67,7 +67,7 @@ export async function GET(req: NextRequest) {
     let total = 0;
     while (true) {
       const chRes = await fetch(
-        `${base}/api/admin-hub/channels/?p=${page}&page_size=200&keyword=${encodeURIComponent(keyword)}`,
+        `${base}/api/admin-hub/channels/?p=${page}&page_size=500&keyword=${encodeURIComponent(keyword)}`,
         { headers, signal: AbortSignal.timeout(30000) }
       );
       const chJson = await chRes.json();
