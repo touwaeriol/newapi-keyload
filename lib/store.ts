@@ -20,7 +20,6 @@ const SEED_MODELS = DEFAULT_MODELS; // 模型列表默认（管理员可配）
 const SEED_AUTO_REFILL_ENABLED = true;
 const SEED_REFILL_INTERVAL_MINUTES = 1;
 const SEED_PRIORITY6_LIMIT = 6; // 优先级6渠道数量上限（naci 账号配额）
-const SEED_PRIORITY_TASK_INTERVAL_MINUTES = 5; // 优先级对账全局定时任务间隔（分钟）
 const SEED_DEMOTE_INTERVAL_SECONDS = 30; // 退化降级检测间隔（秒）
 const SEED_DEMOTE_GRACE_SECONDS = 30; // 退化判定宽限期（秒）
 const SEED_USAGE_REFRESH_INTERVAL_MINUTES = 10; // 用量刷新频率（分钟）
@@ -59,14 +58,6 @@ export function clampPriority6Limit(n: unknown): number {
   const v = Math.floor(Number(n));
   if (!Number.isFinite(v) || v < 0) return SEED_PRIORITY6_LIMIT;
   if (v > 1000) return 1000;
-  return v;
-}
-
-/** 优先级对账任务间隔（分钟）钳制（1~1440，复用补给间隔区间） */
-export function clampPriorityTaskIntervalMinutes(n: unknown): number {
-  const v = Math.floor(Number(n));
-  if (!Number.isFinite(v) || v < 1) return SEED_PRIORITY_TASK_INTERVAL_MINUTES;
-  if (v > 1440) return 1440;
   return v;
 }
 
@@ -223,10 +214,8 @@ async function createTables(pool: Pool): Promise<void> {
   await pool.query(
     `ALTER TABLE config ADD COLUMN IF NOT EXISTS priority6_limit int NOT NULL DEFAULT 6`
   );
-  // 优先级降级全局定时任务间隔（分钟，默认 5）。
-  await pool.query(
-    `ALTER TABLE config ADD COLUMN IF NOT EXISTS priority_task_interval_minutes int NOT NULL DEFAULT 5`
-  );
+  // priority_task_interval_minutes：旧「优先级对账」任务的间隔列。任务已删除
+  //（见 channelService.ts 尾注），列保留兼容旧版本回滚，代码不再读写。
   // 僵尸/退化判定宽限期（分钟，默认 5）——旧列，保留兼容，已改用秒。
   await pool.query(
     `ALTER TABLE config ADD COLUMN IF NOT EXISTS demote_grace_minutes int NOT NULL DEFAULT 5`
@@ -628,7 +617,6 @@ export async function getConfig(): Promise<SystemConfig> {
     auto_refill_enabled: boolean;
     refill_interval_minutes: number;
     priority6_limit: number;
-    priority_task_interval_minutes: number;
     demote_grace_minutes: number;
     demote_interval_seconds: number;
     demote_grace_seconds: number;
@@ -641,7 +629,7 @@ export async function getConfig(): Promise<SystemConfig> {
     user_manual_upload_enabled: boolean;
     only_high_priority_enabled: boolean;
   }>(
-    "SELECT naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, priority_task_interval_minutes, demote_grace_minutes, demote_interval_seconds, demote_grace_seconds, usage_refresh_interval_minutes, usage_max_updates, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes, user_manual_upload_enabled, only_high_priority_enabled FROM config WHERE id = 1"
+    "SELECT naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, demote_grace_minutes, demote_interval_seconds, demote_grace_seconds, usage_refresh_interval_minutes, usage_max_updates, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes, user_manual_upload_enabled, only_high_priority_enabled FROM config WHERE id = 1"
   );
   if (!rows[0]) {
     return {
@@ -655,7 +643,6 @@ export async function getConfig(): Promise<SystemConfig> {
       autoRefillEnabled: SEED_AUTO_REFILL_ENABLED,
       refillIntervalMinutes: SEED_REFILL_INTERVAL_MINUTES,
       priority6Limit: SEED_PRIORITY6_LIMIT,
-      priorityTaskIntervalMinutes: SEED_PRIORITY_TASK_INTERVAL_MINUTES,
       demoteIntervalSeconds: SEED_DEMOTE_INTERVAL_SECONDS,
       demoteGraceSeconds: SEED_DEMOTE_GRACE_SECONDS,
       usageRefreshIntervalMinutes: SEED_USAGE_REFRESH_INTERVAL_MINUTES,
@@ -679,9 +666,6 @@ export async function getConfig(): Promise<SystemConfig> {
     autoRefillEnabled: Boolean(rows[0].auto_refill_enabled),
     refillIntervalMinutes: clampIntervalMinutes(rows[0].refill_interval_minutes),
     priority6Limit: clampPriority6Limit(rows[0].priority6_limit),
-    priorityTaskIntervalMinutes: clampPriorityTaskIntervalMinutes(
-      rows[0].priority_task_interval_minutes
-    ),
     demoteIntervalSeconds: clampDemoteIntervalSeconds(
       rows[0].demote_interval_seconds
     ),
@@ -709,8 +693,8 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
   const pool = await ensureReady();
   const models = (cfg.models ?? "").trim() || SEED_MODELS;
   await pool.query(
-    `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, priority_task_interval_minutes, demote_interval_seconds, demote_grace_seconds, usage_refresh_interval_minutes, usage_max_updates, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes, user_manual_upload_enabled, only_high_priority_enabled)
-     VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+    `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, demote_interval_seconds, demote_grace_seconds, usage_refresh_interval_minutes, usage_max_updates, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes, user_manual_upload_enabled, only_high_priority_enabled)
+     VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
      ON CONFLICT (id) DO UPDATE SET
        naci_base_url = EXCLUDED.naci_base_url,
        naci_token = EXCLUDED.naci_token,
@@ -722,7 +706,6 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
        auto_refill_enabled = EXCLUDED.auto_refill_enabled,
        refill_interval_minutes = EXCLUDED.refill_interval_minutes,
        priority6_limit = EXCLUDED.priority6_limit,
-       priority_task_interval_minutes = EXCLUDED.priority_task_interval_minutes,
        demote_interval_seconds = EXCLUDED.demote_interval_seconds,
        demote_grace_seconds = EXCLUDED.demote_grace_seconds,
        usage_refresh_interval_minutes = EXCLUDED.usage_refresh_interval_minutes,
@@ -744,7 +727,6 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
       cfg.autoRefillEnabled ?? SEED_AUTO_REFILL_ENABLED,
       clampIntervalMinutes(cfg.refillIntervalMinutes),
       clampPriority6Limit(cfg.priority6Limit),
-      clampPriorityTaskIntervalMinutes(cfg.priorityTaskIntervalMinutes),
       clampDemoteIntervalSeconds(cfg.demoteIntervalSeconds),
       clampDemoteGraceSeconds(cfg.demoteGraceSeconds),
       clampUsageRefreshIntervalMinutes(cfg.usageRefreshIntervalMinutes),

@@ -22,7 +22,6 @@ export async function GET(req: NextRequest) {
       autoRefillEnabled: cfg.autoRefillEnabled,
       refillIntervalMinutes: cfg.refillIntervalMinutes,
       priority6Limit: cfg.priority6Limit,
-      priorityTaskIntervalMinutes: cfg.priorityTaskIntervalMinutes,
       demoteIntervalSeconds: cfg.demoteIntervalSeconds,
       demoteGraceSeconds: cfg.demoteGraceSeconds,
       usageRefreshIntervalMinutes: cfg.usageRefreshIntervalMinutes,
@@ -55,7 +54,6 @@ export async function PUT(req: NextRequest) {
       autoRefillEnabled?: boolean;
       refillIntervalMinutes?: number;
       priority6Limit?: number;
-      priorityTaskIntervalMinutes?: number;
       demoteIntervalSeconds?: number;
       demoteGraceSeconds?: number;
       usageRefreshIntervalMinutes?: number;
@@ -109,11 +107,6 @@ export async function PUT(req: NextRequest) {
       body.priority6Limit == null
         ? current.priority6Limit
         : body.priority6Limit;
-    // 未传则保留原值；由 store.saveConfig 内部钳制到 1~1440 分钟
-    const priorityTaskIntervalMinutes =
-      body.priorityTaskIntervalMinutes == null
-        ? current.priorityTaskIntervalMinutes
-        : body.priorityTaskIntervalMinutes;
     // 未传则保留原值；由 store.saveConfig 内部钳制到 5~86400 秒
     const demoteIntervalSeconds =
       body.demoteIntervalSeconds == null
@@ -170,7 +163,6 @@ export async function PUT(req: NextRequest) {
       autoRefillEnabled,
       refillIntervalMinutes,
       priority6Limit,
-      priorityTaskIntervalMinutes,
       demoteIntervalSeconds,
       demoteGraceSeconds,
       usageRefreshIntervalMinutes,
@@ -195,7 +187,6 @@ export async function PUT(req: NextRequest) {
       autoRefillEnabled: saved.autoRefillEnabled,
       refillIntervalMinutes: saved.refillIntervalMinutes,
       priority6Limit: saved.priority6Limit,
-      priorityTaskIntervalMinutes: saved.priorityTaskIntervalMinutes,
       demoteIntervalSeconds: saved.demoteIntervalSeconds,
       demoteGraceSeconds: saved.demoteGraceSeconds,
       usageRefreshIntervalMinutes: saved.usageRefreshIntervalMinutes,

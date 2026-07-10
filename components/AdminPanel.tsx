@@ -95,8 +95,6 @@ interface ConfigResponse {
   refillIntervalMinutes: number;
   /** 优先级 6 渠道数量上限（本地检测配额，0~1000） */
   priority6Limit: number;
-  /** 优先级对账全局任务间隔（分钟，1~1440） */
-  priorityTaskIntervalMinutes: number;
   /** 退化降级检测间隔（秒，5~86400） */
   demoteIntervalSeconds: number;
   /** 退化判定宽限期（秒，0~86400） */
@@ -123,7 +121,6 @@ const DEFAULT_BATCH_SIZE = 20;
 const DEFAULT_PROCESS_BATCH = 20;
 const DEFAULT_INTERVAL_MINUTES = 1;
 const DEFAULT_PRIORITY6_LIMIT = 6;
-const DEFAULT_PRIORITY_TASK_INTERVAL = 5;
 const DEFAULT_DEMOTE_INTERVAL_SEC = 30;
 const DEFAULT_DEMOTE_GRACE_SEC = 30;
 const DEFAULT_USAGE_REFRESH_MIN = 10;
@@ -146,9 +143,6 @@ function ConfigCard() {
   );
   const [priority6Limit, setPriority6Limit] = useState<number>(
     DEFAULT_PRIORITY6_LIMIT
-  );
-  const [priorityTaskInterval, setPriorityTaskInterval] = useState<number>(
-    DEFAULT_PRIORITY_TASK_INTERVAL
   );
   const [demoteInterval, setDemoteInterval] = useState<number>(
     DEFAULT_DEMOTE_INTERVAL_SEC
@@ -223,12 +217,6 @@ function ConfigCard() {
         typeof data.priority6Limit === "number" && data.priority6Limit >= 0
           ? data.priority6Limit
           : DEFAULT_PRIORITY6_LIMIT
-      );
-      setPriorityTaskInterval(
-        typeof data.priorityTaskIntervalMinutes === "number" &&
-          data.priorityTaskIntervalMinutes > 0
-          ? data.priorityTaskIntervalMinutes
-          : DEFAULT_PRIORITY_TASK_INTERVAL
       );
       setDemoteInterval(
         typeof data.demoteIntervalSeconds === "number" &&
@@ -323,14 +311,6 @@ function ConfigCard() {
     const safeP6 = Number.isNaN(p6raw)
       ? DEFAULT_PRIORITY6_LIMIT
       : Math.min(1000, Math.max(0, Math.round(p6raw)));
-    // 优先级降级任务间隔夹到 1~1440 分钟
-    const safePriInterval = Math.min(
-      1440,
-      Math.max(
-        1,
-        Math.round(Number(priorityTaskInterval) || DEFAULT_PRIORITY_TASK_INTERVAL)
-      )
-    );
     // 退化降级检测间隔夹到 5~86400 秒
     const safeDemoteInterval = Math.min(
       86400,
@@ -383,7 +363,6 @@ function ConfigCard() {
           autoRefillEnabled: autoRefill,
           refillIntervalMinutes: safeInterval,
           priority6Limit: safeP6,
-          priorityTaskIntervalMinutes: safePriInterval,
           demoteIntervalSeconds: safeDemoteInterval,
           demoteGraceSeconds: safeGrace,
           usageRefreshIntervalMinutes: safeUsageRefresh,

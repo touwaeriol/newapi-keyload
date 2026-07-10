@@ -56,11 +56,6 @@ export interface SystemConfig {
    */
   priority6Limit: number;
   /**
-   * 优先级对账定时任务间隔（分钟，1~1440）：**全局**单任务定期把本地优先级与 naci 实际值对账，
-   * 修正静默降级漂移；退化降级检测由独立快循环按秒执行。
-   */
-  priorityTaskIntervalMinutes: number;
-  /**
    * 退化降级检测间隔（秒，5~86400）：独立快循环每 N 秒用一次 status-batch 读高优先级渠道状态，
    * 任一站点禁用即降到 5。下限 5s 防止打爆 naci。
    */
