@@ -5,6 +5,7 @@ import type { SafeUser } from "@/lib/types";
 import { apiFetch } from "@/lib/client";
 import { useToast } from "@/components/Toast";
 import { Button, Card, Spinner } from "@/components/ui";
+import { UserChannelCard } from "@/components/UserChannelCard";
 import {
   UploadResultView,
   DirectResultView,
@@ -44,6 +45,7 @@ interface CreateBatchResult {
 
 export function UserPanel({ user }: { user: SafeUser }) {
   const toast = useToast();
+  const [tab, setTab] = useState<"my" | "channels">("my");
   const [channel, setChannel] = useState<ChannelStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const mounted = useRef(true);
@@ -157,21 +159,51 @@ export function UserPanel({ user }: { user: SafeUser }) {
   }, [toast, fetchChannel]);
 
   return (
-    <div className="grid gap-4 lg:grid-cols-2">
-      <ChannelCard
-        user={user}
-        channel={channel}
-        loading={loading}
-        onRefresh={() => fetchChannel(false)}
-        onSiteToggle={handleSiteToggle}
-        onDemote={handleDemote}
-        onSyncUsage={handleSyncUsage}
-      />
-      <UploadCard
-        onUploaded={() => fetchChannel(false)}
-        manualUploadEnabled={channel?.manualUploadEnabled !== false}
-        onlyHighPriority={channel?.onlyHighPriority === true}
-      />
+    <div className="space-y-4">
+      {/* Tab 导航 */}
+      <div className="flex gap-1 rounded-xl bg-slate-100 p-1 w-fit">
+        <button
+          onClick={() => setTab("my")}
+          className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium transition ${
+            tab === "my"
+              ? "bg-white text-slate-800 shadow-sm"
+              : "text-slate-500 hover:text-slate-700"
+          }`}
+        >
+          📤 我的渠道
+        </button>
+        <button
+          onClick={() => setTab("channels")}
+          className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium transition ${
+            tab === "channels"
+              ? "bg-white text-slate-800 shadow-sm"
+              : "text-slate-500 hover:text-slate-700"
+          }`}
+        >
+          📊 渠道列表
+        </button>
+      </div>
+
+      {tab === "my" ? (
+        <div className="grid gap-4 lg:grid-cols-2">
+          <ChannelCard
+            user={user}
+            channel={channel}
+            loading={loading}
+            onRefresh={() => fetchChannel(false)}
+            onSiteToggle={handleSiteToggle}
+            onDemote={handleDemote}
+            onSyncUsage={handleSyncUsage}
+          />
+          <UploadCard
+            onUploaded={() => fetchChannel(false)}
+            manualUploadEnabled={channel?.manualUploadEnabled !== false}
+            onlyHighPriority={channel?.onlyHighPriority === true}
+          />
+        </div>
+      ) : (
+        <UserChannelCard user={user} />
+      )}
     </div>
   );
 }
