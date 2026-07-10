@@ -295,15 +295,6 @@ export function UserEditorModal({
 
         {isEdit && (
           <div className="space-y-3 rounded-lg bg-slate-50 px-3 py-3">
-            <label className="flex cursor-not-allowed items-center gap-2 text-sm text-slate-400">
-              <input
-                type="checkbox"
-                checked={false}
-                disabled
-                className="h-4 w-4 rounded border-slate-200 text-slate-300"
-              />
-              禁用该用户（功能开发中…）
-            </label>
             <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-600">
               <input
                 type="checkbox"
