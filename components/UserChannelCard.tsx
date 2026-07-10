@@ -66,7 +66,6 @@ export function UserChannelCard({ user }: { user: SafeUser }) {
   const t = useToast();
   const prefix = user.channelName.trim();
   const [loading, setLoading] = useState(false);
-  const [downloading, setDownloading] = useState(false);
   const [result, setResult] = useState<SearchResult | null>(null);
 
   const search = useCallback(async (page: number) => {
@@ -87,17 +86,6 @@ export function UserChannelCard({ user }: { user: SafeUser }) {
   // 自动首次加载
   useEffect(() => { search(1); }, [search]);
 
-  const download = useCallback(async () => {
-    setDownloading(true);
-    try {
-      window.open(`/api/my/channels/download`, "_blank");
-    } catch (err) {
-      t.error(`下载失败：${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setDownloading(false);
-    }
-  }, [t]);
-
   const totalPages = result ? Math.ceil(result.total / result.pageSize) : 0;
 
   if (!prefix) {
@@ -114,13 +102,7 @@ export function UserChannelCard({ user }: { user: SafeUser }) {
     <Card
       title="📊 渠道列表"
       subtitle={`前缀 "${prefix}" — naci 实时用量与站点/key状态`}
-      actions={
-        result && result.total > 0 && (
-          <Button variant="secondary" onClick={download} loading={downloading}>
-            📥 下载报表
-          </Button>
-        )
-      }
+      actions={null}
     >
       {loading && !result && (
         <div className="flex items-center justify-center gap-2 py-8 text-slate-400">

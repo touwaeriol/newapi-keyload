@@ -1,17 +1,17 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { apiFetch } from "@/lib/client";
 import { useToast } from "@/components/Toast";
 import { Badge, Button, Card, Spinner, TextInput } from "@/components/ui";
 
 const QUOTA_PER_USD = 500000;
-const SITE_NAMES: Record<number, string> = { 6: "AC", 13: "AGT", 21: "61" };
+const CLIENT_PAGE_SIZE = 100;
 
 interface SiteStatus {
   site_id: number;
   site_name: string;
-  status: number; // 1=打开, 3=自动禁用
+  status: number;
 }
 
 interface ChannelItem {
@@ -30,8 +30,6 @@ interface ChannelItem {
 }
 
 interface SearchResult {
-  page: number;
-  pageSize: number;
   total: number;
   items: ChannelItem[];
 }
@@ -67,17 +65,21 @@ export function AdminChannelCard() {
   const [keyword, setKeyword] = useState("");
   const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
-  const [result, setResult] = useState<SearchResult | null>(null);
+  const [allItems, setAllItems] = useState<ChannelItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
 
-  const search = useCallback(async (page: number) => {
+  const search = useCallback(async () => {
     const kw = keyword.trim();
     if (!kw) return;
     setLoading(true);
     try {
       const data = await apiFetch<SearchResult>(
-        `/api/admin/channels/search?keyword=${encodeURIComponent(kw)}&page=${page}&pageSize=50`
+        `/api/admin/channels/search?keyword=${encodeURIComponent(kw)}`
       );
-      setResult(data);
+      setAllItems(data.items);
+      setTotal(data.total);
+      setPage(1);
     } catch (err) {
       t.error(`搜索失败：${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -98,25 +100,29 @@ export function AdminChannelCard() {
     }
   }, [keyword, t]);
 
-  const totalPages = result ? Math.ceil(result.total / result.pageSize) : 0;
+  const totalPages = Math.ceil(total / CLIENT_PAGE_SIZE);
+  const pageItems = useMemo(
+    () => allItems.slice((page - 1) * CLIENT_PAGE_SIZE, page * CLIENT_PAGE_SIZE),
+    [allItems, page]
+  );
 
   return (
     <Card
       title="📊 渠道管理"
-      subtitle="搜索 naci 平台渠道，实时拉取用量与站点/key状态"
+      subtitle="搜索 naci 平台渠道（拉全量后本地分页），实时用量 + 站点/key状态"
       actions={
         <div className="flex items-center gap-2">
           <TextInput
-            placeholder="输入渠道名前缀搜索"
+            placeholder="输入渠道名关键词搜索"
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") search(1); }}
+            onKeyDown={(e) => { if (e.key === "Enter") search(); }}
             className="w-64"
           />
-          <Button onClick={() => search(1)} loading={loading}>
+          <Button onClick={search} loading={loading}>
             🔍 搜索
           </Button>
-          {result && result.total > 0 && (
+          {total > 0 && (
             <Button variant="secondary" onClick={download} loading={downloading}>
               📥 下载报表
             </Button>
@@ -124,9 +130,9 @@ export function AdminChannelCard() {
         </div>
       }
     >
-      {!result && !loading && (
+      {allItems.length === 0 && !loading && (
         <p className="py-8 text-center text-sm text-slate-400">
-          输入渠道名前缀（如 07-09-ANTH-LIU-B）点击搜索
+          输入渠道名关键词（如 07-09-ANTH-LIU-B）点击搜索
         </p>
       )}
 
@@ -136,10 +142,10 @@ export function AdminChannelCard() {
         </div>
       )}
 
-      {result && !loading && (
+      {allItems.length > 0 && !loading && (
         <>
           <div className="mb-2 text-xs text-slate-500">
-            共 {result.total.toLocaleString()} 条，第 {result.page} 页
+            共 {total.toLocaleString()} 条，第 {page}/{totalPages} 页（每页 {CLIENT_PAGE_SIZE} 条）
           </div>
 
           <div className="overflow-x-auto">
@@ -156,7 +162,7 @@ export function AdminChannelCard() {
                 </tr>
               </thead>
               <tbody>
-                {result.items.map((c) => (
+                {pageItems.map((c) => (
                   <tr key={c.id} className="border-b border-slate-50 hover:bg-slate-50">
                     <td className="py-2 pr-2 text-slate-400 font-mono text-xs">{c.id}</td>
                     <td className="py-2 pr-2 text-slate-700 font-medium text-xs">{c.name}</td>
@@ -202,21 +208,13 @@ export function AdminChannelCard() {
           {totalPages > 1 && (
             <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-3">
               <span className="text-xs text-slate-400">
-                第 {result.page} / {totalPages} 页
+                第 {page} / {totalPages} 页
               </span>
               <div className="flex gap-2">
-                <Button
-                  variant="secondary"
-                  disabled={result.page <= 1}
-                  onClick={() => search(result.page - 1)}
-                >
+                <Button variant="secondary" disabled={page <= 1} onClick={() => setPage(page - 1)}>
                   上一页
                 </Button>
-                <Button
-                  variant="secondary"
-                  disabled={result.page >= totalPages}
-                  onClick={() => search(result.page + 1)}
-                >
+                <Button variant="secondary" disabled={page >= totalPages} onClick={() => setPage(page + 1)}>
                   下一页
                 </Button>
               </div>
