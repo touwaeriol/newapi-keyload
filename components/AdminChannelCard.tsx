@@ -6,6 +6,13 @@ import { useToast } from "@/components/Toast";
 import { Badge, Button, Card, Spinner, TextInput } from "@/components/ui";
 
 const QUOTA_PER_USD = 500000;
+const SITE_NAMES: Record<number, string> = { 6: "AC", 13: "AGT", 21: "61" };
+
+interface SiteStatus {
+  site_id: number;
+  site_name: string;
+  status: number; // 1=打开, 3=自动禁用
+}
 
 interface ChannelItem {
   id: number;
@@ -15,6 +22,11 @@ interface ChannelItem {
   used_amount: number;
   created_at: string;
   updated_at: string;
+  sites: SiteStatus[];
+  multiKeySize: number;
+  aliveCount: number | null;
+  deadCount: number | null;
+  hasStatus: boolean;
 }
 
 interface SearchResult {
@@ -30,10 +42,24 @@ function fmtUsd(v: number) {
 
 function fmtTime(ts: string) {
   if (!ts) return "";
-  // naci 返回 "2026-07-10 08:26:17" 无时区 → 补 Z 当 UTC 解析
   const d = new Date(ts.length === 19 ? ts + "Z" : ts);
   if (Number.isNaN(d.getTime())) return ts;
   return d.toLocaleString("zh-CN", { hour12: false });
+}
+
+function SiteDot({ site }: { site: SiteStatus }) {
+  const open = site.status === 1;
+  return (
+    <span
+      title={`${site.site_name}: ${open ? "已打开" : `自动禁用(${site.status})`}`}
+      className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-xs font-medium ${
+        open ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-600"
+      }`}
+    >
+      <span className={`inline-block h-1.5 w-1.5 rounded-full ${open ? "bg-emerald-500" : "bg-rose-400"}`} />
+      {site.site_name}
+    </span>
+  );
 }
 
 export function AdminChannelCard() {
@@ -77,7 +103,7 @@ export function AdminChannelCard() {
   return (
     <Card
       title="📊 渠道管理"
-      subtitle="搜索 naci 平台渠道，查看用量，导出报表"
+      subtitle="搜索 naci 平台渠道，实时拉取用量与站点/key状态"
       actions={
         <div className="flex items-center gap-2">
           <TextInput
@@ -98,7 +124,6 @@ export function AdminChannelCard() {
         </div>
       }
     >
-      {/* 结果表格 */}
       {!result && !loading && (
         <p className="py-8 text-center text-sm text-slate-400">
           输入渠道名前缀（如 07-09-ANTH-LIU-B）点击搜索
@@ -107,7 +132,7 @@ export function AdminChannelCard() {
 
       {loading && (
         <div className="flex items-center justify-center gap-2 py-8 text-slate-400">
-          <Spinner /> <span className="text-sm">搜索中…</span>
+          <Spinner /> <span className="text-sm">搜索 + 拉取用量和状态中…</span>
         </div>
       )}
 
@@ -121,30 +146,50 @@ export function AdminChannelCard() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-200 text-left text-xs text-slate-500">
-                  <th className="pb-2 pr-3 font-medium">naci ID</th>
-                  <th className="pb-2 pr-3 font-medium">渠道名</th>
-                  <th className="pb-2 pr-3 font-medium">优先级</th>
-                  <th className="pb-2 pr-3 text-right font-medium">used_quota</th>
-                  <th className="pb-2 pr-3 text-right font-medium">金额 USD</th>
+                  <th className="pb-2 pr-2 font-medium">naci ID</th>
+                  <th className="pb-2 pr-2 font-medium">渠道名</th>
+                  <th className="pb-2 pr-2 font-medium">P</th>
+                  <th className="pb-2 pr-2 font-medium">站点状态</th>
+                  <th className="pb-2 pr-2 text-center font-medium">Key</th>
+                  <th className="pb-2 pr-2 text-right font-medium">金额 USD</th>
                   <th className="pb-2 font-medium">创建时间</th>
                 </tr>
               </thead>
               <tbody>
                 {result.items.map((c) => (
                   <tr key={c.id} className="border-b border-slate-50 hover:bg-slate-50">
-                    <td className="py-2 pr-3 text-slate-500 font-mono text-xs">{c.id}</td>
-                    <td className="py-2 pr-3 text-slate-700 font-medium">{c.name}</td>
-                    <td className="py-2 pr-3">
+                    <td className="py-2 pr-2 text-slate-400 font-mono text-xs">{c.id}</td>
+                    <td className="py-2 pr-2 text-slate-700 font-medium text-xs">{c.name}</td>
+                    <td className="py-2 pr-2">
                       {c.priority != null ? (
                         <Badge tone={c.priority >= 6 ? "blue" : "slate"}>{c.priority}</Badge>
                       ) : (
                         <span className="text-slate-300">?</span>
                       )}
                     </td>
-                    <td className="py-2 pr-3 text-right text-slate-600 tabular-nums">
-                      {c.used_quota.toLocaleString()}
+                    <td className="py-2 pr-2">
+                      <div className="flex gap-1 flex-wrap">
+                        {c.sites.length > 0
+                          ? c.sites.map(s => <SiteDot key={s.site_id} site={s} />)
+                          : <span className="text-xs text-slate-300">-</span>
+                        }
+                      </div>
                     </td>
-                    <td className="py-2 pr-3 text-right text-slate-700 tabular-nums font-medium">
+                    <td className="py-2 pr-2 text-center">
+                      {c.hasStatus ? (
+                        <span className={`text-xs tabular-nums ${
+                          c.deadCount != null && c.deadCount > 0 ? "text-rose-600 font-medium" : "text-slate-500"
+                        }`}>
+                          {c.aliveCount != null ? `${c.aliveCount}/` : ""}{c.multiKeySize}
+                          {c.deadCount != null && c.deadCount > 0 && (
+                            <span className="text-rose-400"> -{c.deadCount}</span>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-slate-300">-</span>
+                      )}
+                    </td>
+                    <td className="py-2 pr-2 text-right text-slate-700 tabular-nums font-medium text-xs">
                       {fmtUsd(c.used_quota)}
                     </td>
                     <td className="py-2 text-xs text-slate-400">{fmtTime(c.created_at)}</td>
@@ -154,7 +199,6 @@ export function AdminChannelCard() {
             </table>
           </div>
 
-          {/* 分页 */}
           {totalPages > 1 && (
             <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-3">
               <span className="text-xs text-slate-400">

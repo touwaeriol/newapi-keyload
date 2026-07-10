@@ -24,7 +24,7 @@ const SEED_PRIORITY_TASK_INTERVAL_MINUTES = 5; // 优先级对账全局定时任
 const SEED_DEMOTE_INTERVAL_SECONDS = 30; // 退化降级检测间隔（秒）
 const SEED_DEMOTE_GRACE_SECONDS = 30; // 退化判定宽限期（秒）
 const SEED_USAGE_REFRESH_INTERVAL_MINUTES = 10; // 用量刷新频率（分钟）
-const SEED_USAGE_MAX_UPDATES = 2; // 每渠道最多刷新用量次数（刷够即冻结）
+const SEED_USAGE_MAX_UPDATES = 3; // 每渠道前 N 次按频率刷新，刷够后等 1 小时补最后一次，之后冻结
 const SEED_UPLOAD_LIMIT_COUNT = 0; // 上传限速·个数（全局/用户默认共用 seed；0=不限速）
 const SEED_UPLOAD_LIMIT_WINDOW_MINUTES = 10; // 上传限速窗口（分钟，全局/用户默认共用 seed）
 const SEED_USER_MANUAL_UPLOAD_ENABLED = true; // 默认允许用户手动上传
@@ -1127,8 +1127,10 @@ export async function deleteCreatedChannel(id: string): Promise<void> {
 }
 
 /**
- * 取需要刷新用量的已建渠道：channel_id 非空且刷新次数 < maxUpdates，
- * 最久未刷新的优先（NULLS FIRST=从未刷新的先来）。刷够即冻结，避免雪崩。
+ * 取需要刷新用量的已建渠道：
+ * - 刷新次数 < maxUpdates（前 N 次按频率刷新，如每 10 分钟），或
+ * - 刷新次数 = maxUpdates 且距上次刷新已过 1 小时（补最后一次，之后永久冻结）
+ * 最久未刷新的优先（NULLS FIRST=从未刷新的先来）。
  */
 export async function listChannelsNeedingUsageRefresh(
   maxUpdates: number,
@@ -1137,7 +1139,15 @@ export async function listChannelsNeedingUsageRefresh(
   const pool = await ensureReady();
   const { rows } = await pool.query<CreatedChannelRow>(
     `SELECT * FROM created_channels
-      WHERE channel_id IS NOT NULL AND usage_update_count < $1
+      WHERE channel_id IS NOT NULL
+        AND (
+          usage_update_count < $1
+          OR (
+            usage_update_count = $1
+            AND usage_updated_at IS NOT NULL
+            AND usage_updated_at < now() - interval '1 hour'
+          )
+        )
       ORDER BY usage_updated_at ASC NULLS FIRST, created_at ASC
       LIMIT $2`,
     [maxUpdates, limit]

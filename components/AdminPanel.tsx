@@ -127,7 +127,7 @@ const DEFAULT_PRIORITY_TASK_INTERVAL = 5;
 const DEFAULT_DEMOTE_INTERVAL_SEC = 30;
 const DEFAULT_DEMOTE_GRACE_SEC = 30;
 const DEFAULT_USAGE_REFRESH_MIN = 10;
-const DEFAULT_USAGE_MAX_UPDATES = 2;
+const DEFAULT_USAGE_MAX_UPDATES = 3;
 const DEFAULT_UPLOAD_LIMIT_COUNT = 0; // 0=不限速
 const DEFAULT_UPLOAD_LIMIT_WINDOW = 10;
 const DEFAULT_MODELS = "claude-opus-4-6,claude-opus-4-7,claude-opus-4-8";
@@ -611,7 +611,7 @@ function ConfigCard() {
               </Field>
               <Field
                 label="每渠道最多刷新用量次数"
-                hint="某渠道刷够此次数即冻结、不再拉用量，避免雪崩；0=不刷新用量，0~100"
+                hint="前 N 次按频率刷新，刷够后等 1 小时补最后一次，之后永久冻结；0=不刷新用量，0~100"
               >
                 <TextInput
                   type="number"
