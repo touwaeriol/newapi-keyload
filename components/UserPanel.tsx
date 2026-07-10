@@ -367,9 +367,17 @@ function UploadCard({
           res.waitingMessage ??
             `已录入 ${res.added} 个，剩余待上传 ${res.poolPending}，由定时任务公平分配高优先级渠道`
         );
+      } else if (res.added === 0 && res.pushed === 0) {
+        toast.info(
+          "这些 key 此前都已录入过（去重后无新 key），本次未新建渠道"
+        );
       } else {
         toast.success(
-          `已建 ${res.createdChannels} 个新渠道共传 ${res.pushed} 个（新录入 ${res.added}，剩余待上传 ${res.poolPending}）`
+          `已建 ${res.createdChannels} 个新渠道共传 ${res.pushed} 个（新录入 ${res.added}${
+            res.poolPending > 0
+              ? `，剩余待上传 ${res.poolPending}，引擎会自动续传`
+              : ""
+          }）`
         );
       }
       onUploaded();

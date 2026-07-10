@@ -22,6 +22,7 @@ import {
   getConfig,
   poolCounts,
   prefixesWithCreatedChannels,
+  reclaimClaimedBefore,
   reclaimStaleClaimed,
 } from "./store";
 import { FIXED_PRIORITY } from "./supplier";
@@ -517,6 +518,27 @@ export function startEngine(): void {
   const state = engineState();
   if (state.started) return;
   state.started = true;
+
+  // 启动即回收上个进程残留的「认领中」key：本系统单进程，claimed_at 早于本进程启动的行
+  // 必属已死进程（部署重启/崩溃打断的直接上传或引擎批次）。不等 10 分钟阈值立即退回待上传，
+  // 避免用户点完直接上传撞上重启后，key 在「待上传」里挂 10+ 分钟像是被丢进队列。
+  const bootAt = new Date();
+  setTimeout(() => {
+    void (async () => {
+      try {
+        const n = await reclaimClaimedBefore(bootAt);
+        if (n > 0) {
+          await safeLog(
+            "warn",
+            undefined,
+            `进程重启：回收上个进程残留的 ${n} 个认领中 key（多为被重启打断的直接上传），已退回待上传，引擎将立即续传`
+          );
+        }
+      } catch (err) {
+        console.error("[engine] 启动回收残留认领失败:", err);
+      }
+    })();
+  }, 3_000);
 
   state.nextTickAt = Date.now() + INITIAL_DELAY_MS;
   state.timer = setTimeout(() => {

@@ -986,6 +986,23 @@ export async function releaseClaim(ids: string[]): Promise<void> {
 }
 
 /**
+ * 回收 claimed_at 早于 cutoff 的认领行 → 退回 pending。
+ * 用于进程启动即回收上个进程残留：本系统单进程，早于本进程启动时刻的认领必属已死进程
+ * （部署重启/崩溃打断的直接上传/引擎批次），无需等 10 分钟阈值。返回回收行数。
+ */
+export async function reclaimClaimedBefore(cutoff: Date): Promise<number> {
+  const pool = await ensureReady();
+  const res = await pool.query(
+    `UPDATE key_pool SET status = 'pending', claimed_at = NULL
+     WHERE status = 'claimed'
+       AND claimed_at IS NOT NULL
+       AND claimed_at < $1`,
+    [cutoff.toISOString()]
+  );
+  return res.rowCount ?? 0;
+}
+
+/**
  * 回收超过阈值仍处于 claimed 的死行（进程在「认领后、结算前」崩溃会残留）→ 退回 pending。
  * 权衡：若在「naci 建渠道成功后、markPoolUploaded 前」这一极窄窗口崩溃，被回收的 key 会在
  * 下一轮重传（产生一次重复），概率极低，属可接受取舍。返回回收行数。
