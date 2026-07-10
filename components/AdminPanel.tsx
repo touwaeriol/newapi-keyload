@@ -498,11 +498,12 @@ function ConfigCard() {
             <CompactField
               label="模型列表"
               hint="新建渠道使用的模型，逗号分隔；默认 claude-opus-4-6,claude-opus-4-7,claude-opus-4-8"
+              className="sm:col-span-2 lg:col-span-3 xl:col-span-4"
             >
               <textarea
                 value={models}
                 onChange={(e) => setModels(e.target.value)}
-                rows={1}
+                rows={2}
                 placeholder={DEFAULT_MODELS}
                 className="w-full resize-y rounded-lg border border-slate-300 px-3 py-1.5 font-mono text-xs text-slate-800 outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100"
               />
@@ -711,14 +712,17 @@ function ConfigSection({
 function CompactField({
   label,
   hint,
+  className = "",
   children,
 }: {
   label: string;
   hint?: string;
+  /** 附加到外层 label 的类（如让字段横跨整行 col-span） */
+  className?: string;
   children: ReactNode;
 }) {
   return (
-    <label className="block" title={hint}>
+    <label className={`block ${className}`} title={hint}>
       <span className="mb-1 flex items-center gap-1 text-[13px] font-medium text-slate-700">
         {label}
         {hint && (
