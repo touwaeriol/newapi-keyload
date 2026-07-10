@@ -181,8 +181,8 @@ export function UploadKeyModal({
                 直接上传站点
               </Button>
             )}
-            <Button onClick={submit} loading={loading} disabled={busy}>
-              提交上传
+            <Button onClick={submit} loading={loading} disabled={true}>
+              提交上传（已禁用）
             </Button>
           </>
         )

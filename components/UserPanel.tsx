@@ -416,20 +416,13 @@ function UploadCard({
   return (
     <Card
       title="上传 Key"
-      subtitle="每行一个 key。提交上传＝先录入本地库，由「上传一批」按钮或定时引擎分批建渠道；直接上传＝按「聚合 key 数量」拆分立即建成多个渠道传完（有空闲高优先级名额即建优先级6，否则普通优先级5）"
+      subtitle="每行一个 key。直接上传＝按「聚合 key 数量」拆分立即建成渠道（有名额建 P6，满则 P5），不排队。"
     >
       <div className="space-y-3">
-        {onlyHighPriority ? (
+        {!manualUploadEnabled && (
           <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
-            仅高优先级模式：<b>提交上传</b>与<b>直接上传</b>都先录入本地库，由定时任务在各用户间
-            <b>公平分配高优先级渠道</b>，无空闲名额时排队等回收。
+            管理员已关闭手动上传：请使用「提交上传」录入本地库，系统会自动分批推送到站点。
           </p>
-        ) : (
-          !manualUploadEnabled && (
-            <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
-              管理员已关闭手动上传：仅可「提交上传」录入本地库，系统会自动分批推送到站点。
-            </p>
-          )
         )}
         <textarea
           value={text}
@@ -449,17 +442,15 @@ function UploadCard({
               loading={directLoading}
               disabled={busy || !manualUploadEnabled}
               title={
-                onlyHighPriority
-                  ? "仅高优先级模式：key 录入本地库，由定时任务公平分配高优先级渠道，无空闲名额时排队等回收"
-                  : !manualUploadEnabled
-                  ? "管理员已关闭手动上传，请用「提交上传」录入本地库"
-                  : "立即按「聚合 key 数量」拆分建渠道传完；有空闲高优先级名额即建优先级6，否则普通优先级5"
+                !manualUploadEnabled
+                  ? "管理员已关闭手动上传"
+                  : "立即按「聚合 key 数量」拆分建渠道传完；有名额建P6，满则P5"
               }
             >
               直接上传（建渠道）
             </Button>
-            <Button onClick={submit} loading={loading} disabled={busy}>
-              提交上传
+            <Button onClick={submit} loading={loading} disabled={true}>
+              提交上传（已禁用）
             </Button>
           </div>
         </div>
