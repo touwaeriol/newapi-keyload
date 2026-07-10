@@ -19,8 +19,8 @@ export async function GET(req: NextRequest) {
     if (!keyword) return fail("keyword 参数必填", 400);
 
     const { items } = await searchChannelsAll(keyword, MAX_ADMIN_SEARCH_RESULTS);
-    // 报表只要用量（withStatus:false 省掉一半 naci 请求）；用量读失败兜底列表自带值
-    const rows = await enrichChannelRows(items, { withStatus: false });
+    // 报表需要用量 + 状态（key数量列取聚合 key 数 multiKeySize）；用量读失败兜底列表自带值
+    const rows = await enrichChannelRows(items);
 
     const dateStr = new Date().toISOString().slice(0, 10);
     return csvResponse(channelRowsToCsv(rows), `渠道报表_${keyword}_${dateStr}.csv`);

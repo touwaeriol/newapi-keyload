@@ -24,8 +24,8 @@ export async function GET(req: NextRequest) {
     const isOwn = ownChannelNameFilter(prefix);
     const mine = items.filter((i) => isOwn(i.name));
 
-    // 报表只要用量（withStatus:false）；用量读失败兜底列表自带值
-    const rows = await enrichChannelRows(mine, { withStatus: false });
+    // 报表需要用量 + 状态（key数量列取聚合 key 数 multiKeySize）；用量读失败兜底列表自带值
+    const rows = await enrichChannelRows(mine);
 
     const dateStr = new Date().toISOString().slice(0, 10);
     return csvResponse(channelRowsToCsv(rows), `渠道报表_${prefix}_${dateStr}.csv`);

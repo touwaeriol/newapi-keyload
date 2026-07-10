@@ -122,21 +122,50 @@ function escapeCsvField(v: string | number | null): string {
   return s;
 }
 
-/** 渠道行 → CSV 报表（UTF-8 BOM，Excel 直接打开不乱码）。 */
+/**
+ * 渠道行 → CSV 报表（UTF-8 BOM，Excel 直接打开不乱码）。
+ * key数量列 = naci 的聚合 key 数（multiKeySize）——一个渠道可聚合多个 key，一渠道≠一 key；
+ * 末尾合计行的 key 总数按聚合数累加。状态没拉到的渠道 key 数留空、不计入合计（合计行会标注几个未知）。
+ */
 export function channelRowsToCsv(rows: ChannelSearchRow[]): string {
-  const lines: string[] = ["naci_id,渠道名,优先级,used_quota,金额USD,创建时间"];
+  const lines: string[] = [
+    "naci_id,渠道名,优先级,key数量,used_quota,金额USD,创建时间",
+  ];
+  let totalKeys = 0;
+  let unknownKeyRows = 0;
+  let totalQuota = 0;
   for (const r of rows) {
+    const keyCount = r.hasStatus && r.multiKeySize > 0 ? r.multiKeySize : null;
+    if (keyCount == null) unknownKeyRows += 1;
+    else totalKeys += keyCount;
+    totalQuota += r.used_quota;
     lines.push(
       [
         r.id,
         escapeCsvField(r.name),
         r.priority ?? "",
+        keyCount ?? "",
         r.used_quota,
         (r.used_quota / QUOTA_PER_USD).toFixed(2),
         escapeCsvField(r.created_at),
       ].join(",")
     );
   }
+  const label =
+    unknownKeyRows > 0
+      ? `合计(${rows.length}渠道,其中${unknownKeyRows}个key数未知)`
+      : `合计(${rows.length}渠道)`;
+  lines.push(
+    [
+      escapeCsvField(label),
+      "",
+      "",
+      totalKeys,
+      totalQuota,
+      (totalQuota / QUOTA_PER_USD).toFixed(2),
+      "",
+    ].join(",")
+  );
   return "﻿" + lines.join("\n");
 }
 
