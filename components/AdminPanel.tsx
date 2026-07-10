@@ -15,6 +15,7 @@ import {
   Spinner,
   TextInput,
 } from "@/components/ui";
+import { AdminChannelCard } from "@/components/AdminChannelCard";
 import { UserEditorModal } from "@/components/UserEditorModal";
 import { UploadKeyModal } from "@/components/UploadKeyModal";
 import {
@@ -33,12 +34,44 @@ function toArray<T>(data: unknown, key: string): T[] {
 }
 
 export function AdminPanel() {
+  const [tab, setTab] = useState<"upload" | "channel">("upload");
+
   return (
     <div className="space-y-4">
-      <ConfigCard />
-      <UploadLimitCard />
-      <UsersCard />
-      <LogsCard />
+      {/* Tab 导航 */}
+      <div className="flex gap-1 rounded-xl bg-slate-100 p-1 w-fit">
+        <button
+          onClick={() => setTab("upload")}
+          className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium transition ${
+            tab === "upload"
+              ? "bg-white text-slate-800 shadow-sm"
+              : "text-slate-500 hover:text-slate-700"
+          }`}
+        >
+          📤 Key上传管理
+        </button>
+        <button
+          onClick={() => setTab("channel")}
+          className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium transition ${
+            tab === "channel"
+              ? "bg-white text-slate-800 shadow-sm"
+              : "text-slate-500 hover:text-slate-700"
+          }`}
+        >
+          📊 渠道管理
+        </button>
+      </div>
+
+      {tab === "upload" ? (
+        <>
+          <ConfigCard />
+          <UploadLimitCard />
+          <UsersCard />
+          <LogsCard />
+        </>
+      ) : (
+        <AdminChannelCard />
+      )}
     </div>
   );
 }
@@ -535,23 +568,6 @@ function ConfigCard() {
                   value={Number.isNaN(priority6Limit) ? "" : priority6Limit}
                   onChange={(e) => setPriority6Limit(e.target.valueAsNumber)}
                   placeholder={String(DEFAULT_PRIORITY6_LIMIT)}
-                />
-              </Field>
-              <Field
-                label="优先级对账间隔（分钟）"
-                hint="每 N 分钟对账本地优先级与 naci 实际值（修正静默降级漂移），1~1440。退化降级检测已固定 30 秒一次。"
-              >
-                <TextInput
-                  type="number"
-                  min={1}
-                  max={1440}
-                  value={
-                    Number.isNaN(priorityTaskInterval) ? "" : priorityTaskInterval
-                  }
-                  onChange={(e) =>
-                    setPriorityTaskInterval(e.target.valueAsNumber)
-                  }
-                  placeholder={String(DEFAULT_PRIORITY_TASK_INTERVAL)}
                 />
               </Field>
               <Field

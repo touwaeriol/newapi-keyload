@@ -1,0 +1,185 @@
+"use client";
+
+import { useState, useCallback } from "react";
+import { apiFetch } from "@/lib/client";
+import { useToast } from "@/components/Toast";
+import { Badge, Button, Card, Spinner, TextInput } from "@/components/ui";
+
+const QUOTA_PER_USD = 500000;
+
+interface ChannelItem {
+  id: number;
+  name: string;
+  priority: number | null;
+  used_quota: number;
+  used_amount: number;
+  created_at: string;
+  updated_at: string;
+}
+
+interface SearchResult {
+  page: number;
+  pageSize: number;
+  total: number;
+  items: ChannelItem[];
+}
+
+function fmtUsd(v: number) {
+  return `$${(v / QUOTA_PER_USD).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function fmtTime(ts: string) {
+  if (!ts) return "";
+  // naci 返回 "2026-07-10 08:26:17" 无时区 → 补 Z 当 UTC 解析
+  const d = new Date(ts.length === 19 ? ts + "Z" : ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  return d.toLocaleString("zh-CN", { hour12: false });
+}
+
+export function AdminChannelCard() {
+  const t = useToast();
+  const [keyword, setKeyword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [result, setResult] = useState<SearchResult | null>(null);
+
+  const search = useCallback(async (page: number) => {
+    const kw = keyword.trim();
+    if (!kw) return;
+    setLoading(true);
+    try {
+      const data = await apiFetch<SearchResult>(
+        `/api/admin/channels/search?keyword=${encodeURIComponent(kw)}&page=${page}&pageSize=50`
+      );
+      setResult(data);
+    } catch (err) {
+      t.error(`搜索失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [keyword, t]);
+
+  const download = useCallback(async () => {
+    const kw = keyword.trim();
+    if (!kw) return;
+    setDownloading(true);
+    try {
+      window.open(`/api/admin/channels/download?keyword=${encodeURIComponent(kw)}`, "_blank");
+    } catch (err) {
+      t.error(`下载失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setDownloading(false);
+    }
+  }, [keyword, t]);
+
+  const totalPages = result ? Math.ceil(result.total / result.pageSize) : 0;
+
+  return (
+    <Card
+      title="📊 渠道管理"
+      subtitle="搜索 naci 平台渠道，查看用量，导出报表"
+      actions={
+        <div className="flex items-center gap-2">
+          <TextInput
+            placeholder="输入渠道名前缀搜索"
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") search(1); }}
+            className="w-64"
+          />
+          <Button onClick={() => search(1)} loading={loading}>
+            🔍 搜索
+          </Button>
+          {result && result.total > 0 && (
+            <Button variant="secondary" onClick={download} loading={downloading}>
+              📥 下载报表
+            </Button>
+          )}
+        </div>
+      }
+    >
+      {/* 结果表格 */}
+      {!result && !loading && (
+        <p className="py-8 text-center text-sm text-slate-400">
+          输入渠道名前缀（如 07-09-ANTH-LIU-B）点击搜索
+        </p>
+      )}
+
+      {loading && (
+        <div className="flex items-center justify-center gap-2 py-8 text-slate-400">
+          <Spinner /> <span className="text-sm">搜索中…</span>
+        </div>
+      )}
+
+      {result && !loading && (
+        <>
+          <div className="mb-2 text-xs text-slate-500">
+            共 {result.total.toLocaleString()} 条，第 {result.page} 页
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 text-left text-xs text-slate-500">
+                  <th className="pb-2 pr-3 font-medium">naci ID</th>
+                  <th className="pb-2 pr-3 font-medium">渠道名</th>
+                  <th className="pb-2 pr-3 font-medium">优先级</th>
+                  <th className="pb-2 pr-3 text-right font-medium">used_quota</th>
+                  <th className="pb-2 pr-3 text-right font-medium">金额 USD</th>
+                  <th className="pb-2 font-medium">创建时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                {result.items.map((c) => (
+                  <tr key={c.id} className="border-b border-slate-50 hover:bg-slate-50">
+                    <td className="py-2 pr-3 text-slate-500 font-mono text-xs">{c.id}</td>
+                    <td className="py-2 pr-3 text-slate-700 font-medium">{c.name}</td>
+                    <td className="py-2 pr-3">
+                      {c.priority != null ? (
+                        <Badge tone={c.priority >= 6 ? "blue" : "slate"}>{c.priority}</Badge>
+                      ) : (
+                        <span className="text-slate-300">?</span>
+                      )}
+                    </td>
+                    <td className="py-2 pr-3 text-right text-slate-600 tabular-nums">
+                      {c.used_quota.toLocaleString()}
+                    </td>
+                    <td className="py-2 pr-3 text-right text-slate-700 tabular-nums font-medium">
+                      {fmtUsd(c.used_quota)}
+                    </td>
+                    <td className="py-2 text-xs text-slate-400">{fmtTime(c.created_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* 分页 */}
+          {totalPages > 1 && (
+            <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-3">
+              <span className="text-xs text-slate-400">
+                第 {result.page} / {totalPages} 页
+              </span>
+              <div className="flex gap-2">
+                <Button
+                  variant="secondary"
+                  disabled={result.page <= 1}
+                  onClick={() => search(result.page - 1)}
+                >
+                  上一页
+                </Button>
+                <Button
+                  variant="secondary"
+                  disabled={result.page >= totalPages}
+                  onClick={() => search(result.page + 1)}
+                >
+                  下一页
+                </Button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </Card>
+  );
+}
