@@ -61,8 +61,8 @@ export async function GET(req: NextRequest) {
 
     const headers = { Cookie: `session=${cookie}` };
 
-    // 1. 翻页搜全量
-    const allItems: { id: number; name: string; priority: number | null; created_at: string }[] = [];
+    // 1. 翻页搜全量（同时记下列表自带的 used_quota 作为兜底）
+    const allItems: { id: number; name: string; priority: number | null; listQuota: number; created_at: string }[] = [];
     let page = 1;
     let total = 0;
     while (true) {
@@ -81,6 +81,7 @@ export async function GET(req: NextRequest) {
           id: Number(item.id),
           name: String(item.name || ""),
           priority: parsePriority(item.channel_json),
+          listQuota: Number(item.used_quota) || 0,
           created_at: String(item.created_at || ""),
         });
       }
@@ -90,38 +91,44 @@ export async function GET(req: NextRequest) {
       await new Promise(r => setTimeout(r, PAGE_DELAY_MS));
     }
 
-    // 2. 分块拉 used-quota
+    // 2. 分块拉 used-quota（失败重试 1 次；以 live 值为准，兜底用列表自带值）
     const ids = allItems.map(i => i.id);
-    const usageMap = new Map<number, number>(); // id → used_quota
+    const usageMap = new Map<number, number>();
     for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
       const chunk = ids.slice(i, i + CHUNK_SIZE);
-      try {
-        const uRes = await fetch(`${base}/api/admin-hub/channels/used-quota`, {
-          method: "POST",
-          headers: { ...headers, "Content-Type": "application/json" },
-          body: JSON.stringify({ ids: chunk }),
-          signal: AbortSignal.timeout(30000),
-        });
-        const uJson = await uRes.json();
-        const uData = (uJson?.data || {}) as Record<string, { used_quota?: number }>;
-        for (const id of chunk) {
-          const entry = uData[String(id)];
-          if (entry && typeof entry === "object") {
-            usageMap.set(id, Number(entry.used_quota) || 0);
+      let ok = false;
+      for (let attempt = 0; attempt < 2 && !ok; attempt++) {
+        try {
+          const uRes = await fetch(`${base}/api/admin-hub/channels/used-quota`, {
+            method: "POST",
+            headers: { ...headers, "Content-Type": "application/json" },
+            body: JSON.stringify({ ids: chunk }),
+            signal: AbortSignal.timeout(30000),
+          });
+          const uJson = await uRes.json();
+          const uData = (uJson?.data || {}) as Record<string, { used_quota?: number }>;
+          for (const id of chunk) {
+            const entry = uData[String(id)];
+            if (entry && typeof entry === "object") {
+              usageMap.set(id, Number(entry.used_quota) || 0);
+            }
           }
+          ok = true;
+        } catch {
+          if (attempt === 0) await new Promise(r => setTimeout(r, 2000)); // 等 2s 重试
         }
-      } catch { /* best-effort: keep going */ }
+      }
       if (i + CHUNK_SIZE < ids.length) {
         await new Promise(r => setTimeout(r, CHUNK_DELAY_MS));
       }
     }
 
-    // 3. 生成 CSV（UTF-8 BOM）
+    // 3. 生成 CSV（UTF-8 BOM）：优先 live 值，兜底列表自带值
     const dateStr = new Date().toISOString().slice(0, 10);
     const rows: string[] = [];
     rows.push("naci_id,渠道名,优先级,used_quota,金额USD,创建时间");
     for (const item of allItems) {
-      const q = usageMap.get(item.id) ?? 0;
+      const q = usageMap.get(item.id) ?? item.listQuota;
       rows.push([
         item.id,
         escapeCsvField(item.name),
