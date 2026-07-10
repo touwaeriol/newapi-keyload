@@ -39,7 +39,6 @@ export function UserEditorModal({
   // 按用户高优先级配额
   const [allowHighPriority, setAllowHighPriority] = useState(true);
   const [highPriorityLimit, setHighPriorityLimit] = useState("");
-  const [userDisabled, setUserDisabled] = useState(false);
   const [loading, setLoading] = useState(false);
 
   // 保存成功后要展示的完整密钥（新建 / 重置密钥）
@@ -67,7 +66,6 @@ export function UserEditorModal({
     setHighPriorityLimit(
       target?.highPriorityLimit == null ? "" : String(target.highPriorityLimit)
     );
-    setUserDisabled(target?.disabled === true);
     setRegenerateKey(false);
     setRevealed(null);
   }, [open, target]);
@@ -132,7 +130,6 @@ export function UserEditorModal({
               uploadLimitWindowMinutes,
               allowHighPriority,
               highPriorityLimit: highPriorityLimitVal,
-              disabled: userDisabled,
             }),
           }
         );
@@ -298,14 +295,14 @@ export function UserEditorModal({
 
         {isEdit && (
           <div className="space-y-3 rounded-lg bg-slate-50 px-3 py-3">
-            <label className="flex cursor-pointer items-center gap-2 text-sm text-rose-600">
+            <label className="flex cursor-not-allowed items-center gap-2 text-sm text-slate-400">
               <input
                 type="checkbox"
-                checked={userDisabled}
-                onChange={(e) => setUserDisabled(e.target.checked)}
-                className="h-4 w-4 rounded border-rose-300 text-rose-600 focus:ring-rose-400"
+                checked={false}
+                disabled
+                className="h-4 w-4 rounded border-slate-200 text-slate-300"
               />
-              禁用该用户（仍可登录查看，但不能上传 key）
+              禁用该用户（功能开发中…）
             </label>
             <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-600">
               <input

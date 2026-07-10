@@ -140,9 +140,6 @@ export async function enqueueKeys(
   user: User,
   keys: string[]
 ): Promise<{ added: number; poolPending: number; poolUploaded: number }> {
-  if (user.disabled) {
-    throw new Error("该用户已被禁用，无法上传 key");
-  }
   const prefix = user.channelName.trim();
   if (!prefix) {
     throw new Error("当前用户未配置渠道前缀，无法上传 key");
@@ -223,10 +220,6 @@ export async function createChannelFromNextBatch(
 ): Promise<CreateBatchResult> {
   const prefix = user.channelName.trim();
   if (!prefix) throw new Error("当前用户未配置渠道前缀，无法上传 key");
-  if (user.disabled) {
-    const { pending, uploaded } = await poolCounts(prefix);
-    return { created: false, poolPending: pending, poolUploaded: uploaded, platformKeyCount: null, deadKeyCount: null };
-  }
 
   const cfg = await getConfig();
   const eff = effectiveUserLimit(user, cfg);
@@ -627,9 +620,6 @@ export async function directUploadKeys(
   keys: string[]
 ): Promise<DirectUploadResult> {
   const prefix = user.channelName.trim();
-  if (user.disabled) {
-    throw new Error("该用户已被禁用，无法上传 key");
-  }
   if (!prefix) {
     throw new Error("当前用户未配置渠道前缀，无法上传 key");
   }

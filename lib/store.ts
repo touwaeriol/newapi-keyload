@@ -187,10 +187,6 @@ async function createTables(pool: Pool): Promise<void> {
   await pool.query(
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS high_priority_limit integer`
   );
-  // 用户禁用：禁用后仍可登录查看，但不能上传 key，定时任务也跳过。
-  await pool.query(
-    `ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled boolean NOT NULL DEFAULT false`
-  );
   await pool.query(`
     CREATE TABLE IF NOT EXISTS config (
       id int PRIMARY KEY DEFAULT 1,
@@ -467,7 +463,6 @@ interface UserRow {
   upload_limit_window_minutes: number | null;
   allow_high_priority: boolean | null;
   high_priority_limit: number | null;
-  disabled: boolean | null;
   created_at: Date | string;
   updated_at: Date | string;
 }
@@ -498,7 +493,6 @@ function rowToUser(r: UserRow): User {
       r.allow_high_priority == null ? true : Boolean(r.allow_high_priority),
     highPriorityLimit:
       r.high_priority_limit == null ? null : Number(r.high_priority_limit),
-    disabled: Boolean(r.disabled),
     createdAt: toIso(r.created_at),
     updatedAt: toIso(r.updated_at),
   };
@@ -550,8 +544,8 @@ export async function findUserByChannelName(
 export async function upsertUser(user: User): Promise<void> {
   const pool = await ensureReady();
   await pool.query(
-    `INSERT INTO users (id, username, role, access_key, channel_name, channel_id, upload_limit_count, upload_limit_window_minutes, allow_high_priority, high_priority_limit, disabled, created_at, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+    `INSERT INTO users (id, username, role, access_key, channel_name, channel_id, upload_limit_count, upload_limit_window_minutes, allow_high_priority, high_priority_limit, created_at, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
      ON CONFLICT (id) DO UPDATE SET
        username = EXCLUDED.username,
        role = EXCLUDED.role,
@@ -562,7 +556,6 @@ export async function upsertUser(user: User): Promise<void> {
        upload_limit_window_minutes = EXCLUDED.upload_limit_window_minutes,
        allow_high_priority = EXCLUDED.allow_high_priority,
        high_priority_limit = EXCLUDED.high_priority_limit,
-       disabled = EXCLUDED.disabled,
        created_at = EXCLUDED.created_at,
        updated_at = EXCLUDED.updated_at`,
     [
@@ -576,7 +569,6 @@ export async function upsertUser(user: User): Promise<void> {
       user.uploadLimitWindowMinutes ?? null,
       user.allowHighPriority ?? true,
       user.highPriorityLimit ?? null,
-      user.disabled ?? false,
       user.createdAt,
       user.updatedAt,
     ]

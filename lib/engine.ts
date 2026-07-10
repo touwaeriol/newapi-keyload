@@ -151,10 +151,6 @@ async function processPrefix(
       recordResult(prefix, "empty", "无绑定用户，跳过");
       return;
     }
-    if (user.disabled) {
-      recordResult(prefix, "paused", "用户已禁用，跳过");
-      return;
-    }
 
     // 注：退化降级已抽出为**全局单一定时任务**（runPriorityTaskAndReschedule），
     // 不再在此每前缀/每轮各自处理。
@@ -254,9 +250,8 @@ async function distributeHighPriorityRoundRobin(): Promise<number> {
     [];
   for (const p of prefixes) {
     const user = await findUserByChannelName(p);
-    if (user && !user.disabled) active.push({ prefix: p, user });
-    else if (!user) recordResult(p, "empty", "无绑定用户，跳过");
-    else recordResult(p, "paused", "用户已禁用，跳过");
+    if (user) active.push({ prefix: p, user });
+    else recordResult(p, "empty", "无绑定用户，跳过");
   }
   let built = 0;
   let guard = 0;

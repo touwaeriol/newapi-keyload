@@ -1139,7 +1139,6 @@ function UsersCard() {
                     <Badge tone={u.role === "admin" ? "blue" : "slate"}>
                       {u.role}
                     </Badge>
-                    {u.disabled && <Badge tone="rose">已禁用</Badge>}
                   </td>
                   <td className="py-2 pr-3 text-slate-600">{u.channelName}</td>
                   <td className="py-2 pr-3 text-right tabular-nums">
