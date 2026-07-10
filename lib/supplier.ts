@@ -141,11 +141,19 @@ export function formatSuffix(n: number): string {
   return String(Math.max(0, Math.floor(n)));
 }
 
-/** 今天的日期标签（MM-DD，上海时区）。 */
+/**
+ * 今天的日期标签（MM-DD，**显式**上海时区）。
+ * 不用 new Date().getMonth()（取的是服务器本地时区）：容器没设 TZ 时日期会在北京时间
+ * 早 8 点才翻天，且与 store.ts 回填 SQL 的 AT TIME ZONE 'Asia/Shanghai' 不一致。
+ */
 export function todayTag(): string {
-  const d = new Date();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Shanghai",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const mm = parts.find((p) => p.type === "month")?.value ?? "00";
+  const dd = parts.find((p) => p.type === "day")?.value ?? "00";
   return `${mm}-${dd}`;
 }
 

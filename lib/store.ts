@@ -348,23 +348,33 @@ async function createTables(pool: Pool): Promise<void> {
   await pool.query(
     `ALTER TABLE created_channels ADD COLUMN IF NOT EXISTS date_tag text NOT NULL DEFAULT '00-00'`
   );
+  // 幂等迁移：新约束 (prefix,date_tag,suffix) 已存在则整段跳过；否则删掉旧的
+  // UNIQUE(prefix,suffix)（按「含 prefix+suffix 且不含 date_tag」精确识别）再建新约束。
+  // 全部放在同一个 DO 块里，避免每次启动 DROP+重建索引（新约束同样包含 prefix/suffix 两列，
+  // 旧版按列匹配会把新约束误当旧约束删掉）。
   await pool.query(`
     DO $$
     DECLARE
       old_name text;
     BEGIN
+      IF EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conrelid = 'created_channels'::regclass
+           AND conname = 'created_channels_prefix_date_suffix_key'
+      ) THEN
+        RETURN;
+      END IF;
       SELECT conname INTO old_name FROM pg_constraint
        WHERE conrelid = 'created_channels'::regclass AND contype = 'u'
          AND conkey @> ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'created_channels'::regclass AND attname = 'prefix')]
-         AND conkey @> ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'created_channels'::regclass AND attname = 'suffix')];
+         AND conkey @> ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'created_channels'::regclass AND attname = 'suffix')]
+         AND NOT conkey @> ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'created_channels'::regclass AND attname = 'date_tag')];
       IF old_name IS NOT NULL THEN
         EXECUTE format('ALTER TABLE created_channels DROP CONSTRAINT %I', old_name);
       END IF;
+      ALTER TABLE created_channels ADD CONSTRAINT created_channels_prefix_date_suffix_key UNIQUE (prefix, date_tag, suffix);
     END $$;
   `);
-  await pool.query(
-    `ALTER TABLE created_channels ADD CONSTRAINT created_channels_prefix_date_suffix_key UNIQUE (prefix, date_tag, suffix)`
-  );
   // 存量行回填日期：已有 created_at 的按创建时间取 MM-DD，无的保留默认 "00-00"。
   await pool.query(
     `UPDATE created_channels SET date_tag = to_char(created_at AT TIME ZONE 'Asia/Shanghai', 'MM-DD') WHERE date_tag = '00-00' AND created_at IS NOT NULL`
