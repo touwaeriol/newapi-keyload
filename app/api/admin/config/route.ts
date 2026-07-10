@@ -32,6 +32,8 @@ export async function GET(req: NextRequest) {
       userUploadLimitWindowMinutes: cfg.userUploadLimitWindowMinutes,
       userManualUploadEnabled: cfg.userManualUploadEnabled,
       onlyHighPriorityEnabled: cfg.onlyHighPriorityEnabled,
+      userQueryIntervalSeconds: cfg.userQueryIntervalSeconds,
+      userReportIntervalMinutes: cfg.userReportIntervalMinutes,
     });
   } catch (err) {
     return errorResponse(err);
@@ -64,6 +66,8 @@ export async function PUT(req: NextRequest) {
       userUploadLimitWindowMinutes?: number;
       userManualUploadEnabled?: boolean;
       onlyHighPriorityEnabled?: boolean;
+      userQueryIntervalSeconds?: number;
+      userReportIntervalMinutes?: number;
     };
     const naciBaseUrl = (body.naciBaseUrl ?? "").trim();
     if (!naciBaseUrl) return fail("naciBaseUrl 不能为空");
@@ -151,6 +155,15 @@ export async function PUT(req: NextRequest) {
       typeof body.onlyHighPriorityEnabled === "boolean"
         ? body.onlyHighPriorityEnabled
         : current.onlyHighPriorityEnabled;
+    // 用户查询/报表限流：未传则保留原值；由 store.saveConfig 内部钳制（0=不限）
+    const userQueryIntervalSeconds =
+      body.userQueryIntervalSeconds == null
+        ? current.userQueryIntervalSeconds
+        : body.userQueryIntervalSeconds;
+    const userReportIntervalMinutes =
+      body.userReportIntervalMinutes == null
+        ? current.userReportIntervalMinutes
+        : body.userReportIntervalMinutes;
 
     await saveConfig({
       naciBaseUrl,
@@ -173,6 +186,8 @@ export async function PUT(req: NextRequest) {
       userUploadLimitWindowMinutes,
       userManualUploadEnabled,
       onlyHighPriorityEnabled,
+      userQueryIntervalSeconds,
+      userReportIntervalMinutes,
     });
     // 回读钳制后的最终值返回
     const saved = await getConfig();
@@ -197,6 +212,8 @@ export async function PUT(req: NextRequest) {
       userUploadLimitWindowMinutes: saved.userUploadLimitWindowMinutes,
       userManualUploadEnabled: saved.userManualUploadEnabled,
       onlyHighPriorityEnabled: saved.onlyHighPriorityEnabled,
+      userQueryIntervalSeconds: saved.userQueryIntervalSeconds,
+      userReportIntervalMinutes: saved.userReportIntervalMinutes,
     });
   } catch (err) {
     return errorResponse(err);

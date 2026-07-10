@@ -7,12 +7,68 @@ import {
   QUOTA_PER_USD,
   type ChannelSearchItem,
 } from "./naci";
+import {
+  bucketRetryAfterMs,
+  releaseBucket,
+  reserveBucketMs,
+} from "./rateLimit";
 import { SITES } from "./supplier";
 
 /** 管理员搜索/下载的全量拉取上限（超过要求细化关键词，保护 naci 与响应体积）。 */
 export const MAX_ADMIN_SEARCH_RESULTS = 5000;
 /** 用户前缀查询的全量拉取上限（单前缀渠道数的合理上界）。 */
 export const MAX_USER_SEARCH_RESULTS = 5000;
+
+/**
+ * 用户渠道管理接口限流闸门（Redis 滑动窗口桶，Redis 不可用自动降级内存桶）：
+ * 占到额度返回 ok + rollback（下游 naci 失败时退还，避免白等一个窗口）；
+ * 占不到返回 429 用的提示文案（带剩余等待时长）。intervalMs<=0 表示不限流。
+ */
+export type RateGate =
+  | { ok: true; rollback: () => Promise<void> }
+  | { ok: false; message: string };
+
+async function acquireGate(
+  scope: string,
+  intervalMs: number,
+  buildMessage: (retryAfterMs: number) => string
+): Promise<RateGate> {
+  if (intervalMs <= 0) return { ok: true, rollback: async () => {} };
+  const { granted, members } = await reserveBucketMs(scope, 1, 1, intervalMs);
+  if (granted > 0) {
+    return { ok: true, rollback: () => releaseBucket(scope, members) };
+  }
+  const retryAfterMs = await bucketRetryAfterMs(scope, intervalMs);
+  return { ok: false, message: buildMessage(retryAfterMs) };
+}
+
+/** 用户渠道查询限流：每 intervalSeconds 秒最多一次（0=不限）。 */
+export function acquireUserQuerySlot(
+  userId: string,
+  intervalSeconds: number
+): Promise<RateGate> {
+  return acquireGate(`qry:user:${userId}`, intervalSeconds * 1000, (ms) => {
+    const wait = Math.max(1, Math.ceil(ms / 1000));
+    return `查询过于频繁：每 ${intervalSeconds} 秒最多查询一次，请 ${wait} 秒后重试`;
+  });
+}
+
+/** 用户报表拉取限流：每 intervalMinutes 分钟最多一次（0=不限）。 */
+export function acquireUserReportSlot(
+  userId: string,
+  intervalMinutes: number
+): Promise<RateGate> {
+  return acquireGate(
+    `rpt:user:${userId}`,
+    intervalMinutes * 60_000,
+    (ms) => {
+      const waitSec = Math.max(1, Math.ceil(ms / 1000));
+      const wait =
+        waitSec >= 60 ? `${Math.ceil(waitSec / 60)} 分钟` : `${waitSec} 秒`;
+      return `报表 ${intervalMinutes} 分钟内只能拉取一次，请 ${wait}后重试`;
+    }
+  );
+}
 
 /** 返回给前端/写入报表的渠道行。 */
 export interface ChannelSearchRow {

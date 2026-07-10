@@ -10,7 +10,6 @@ import {
   Card,
   ConfirmDialog,
   CopyButton,
-  Field,
   Modal,
   Spinner,
   TextInput,
@@ -33,45 +32,45 @@ function toArray<T>(data: unknown, key: string): T[] {
   return [];
 }
 
+type AdminTab = "upload" | "channel" | "config";
+
+const ADMIN_TABS: { key: AdminTab; label: string }[] = [
+  { key: "upload", label: "📤 Key上传管理" },
+  { key: "channel", label: "📊 渠道管理" },
+  { key: "config", label: "⚙️ 系统配置" },
+];
+
 export function AdminPanel() {
-  const [tab, setTab] = useState<"upload" | "channel">("upload");
+  const [tab, setTab] = useState<AdminTab>("upload");
 
   return (
     <div className="space-y-4">
       {/* Tab 导航 */}
       <div className="flex gap-1 rounded-xl bg-slate-100 p-1 w-fit">
-        <button
-          onClick={() => setTab("upload")}
-          className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium transition ${
-            tab === "upload"
-              ? "bg-white text-slate-800 shadow-sm"
-              : "text-slate-500 hover:text-slate-700"
-          }`}
-        >
-          📤 Key上传管理
-        </button>
-        <button
-          onClick={() => setTab("channel")}
-          className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium transition ${
-            tab === "channel"
-              ? "bg-white text-slate-800 shadow-sm"
-              : "text-slate-500 hover:text-slate-700"
-          }`}
-        >
-          📊 渠道管理
-        </button>
+        {ADMIN_TABS.map(({ key, label }) => (
+          <button
+            key={key}
+            onClick={() => setTab(key)}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium transition ${
+              tab === key
+                ? "bg-white text-slate-800 shadow-sm"
+                : "text-slate-500 hover:text-slate-700"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
       </div>
 
-      {tab === "upload" ? (
+      {tab === "upload" && (
         <>
-          <ConfigCard />
           <UploadLimitCard />
           <UsersCard />
           <LogsCard />
         </>
-      ) : (
-        <AdminChannelCard />
       )}
+      {tab === "channel" && <AdminChannelCard />}
+      {tab === "config" && <ConfigCard />}
     </div>
   );
 }
@@ -115,6 +114,10 @@ interface ConfigResponse {
   userManualUploadEnabled: boolean;
   /** 仅使用高优先级渠道：只在有空闲优先级6名额时建渠道，不降级到5 */
   onlyHighPriorityEnabled: boolean;
+  /** 用户渠道查询限流：每 N 秒最多一次（0=不限） */
+  userQueryIntervalSeconds: number;
+  /** 用户报表拉取限流：每 N 分钟最多一次（0=不限） */
+  userReportIntervalMinutes: number;
 }
 
 const DEFAULT_BATCH_SIZE = 20;
@@ -127,6 +130,8 @@ const DEFAULT_USAGE_REFRESH_MIN = 10;
 const DEFAULT_USAGE_MAX_UPDATES = 3;
 const DEFAULT_UPLOAD_LIMIT_COUNT = 0; // 0=不限速
 const DEFAULT_UPLOAD_LIMIT_WINDOW = 10;
+const DEFAULT_QUERY_INTERVAL_SEC = 3; // 用户查询限流：每 3 秒一次
+const DEFAULT_REPORT_INTERVAL_MIN = 3; // 用户报表限流：每 3 分钟一次
 const DEFAULT_MODELS = "claude-opus-4-6,claude-opus-4-7,claude-opus-4-8";
 
 function ConfigCard() {
@@ -165,6 +170,12 @@ function ConfigCard() {
   );
   const [uLimitWindow, setULimitWindow] = useState<number>(
     DEFAULT_UPLOAD_LIMIT_WINDOW
+  );
+  const [qryInterval, setQryInterval] = useState<number>(
+    DEFAULT_QUERY_INTERVAL_SEC
+  );
+  const [rptInterval, setRptInterval] = useState<number>(
+    DEFAULT_REPORT_INTERVAL_MIN
   );
   const [autoRefill, setAutoRefill] = useState(true);
   // 全局「禁止用户手动上传」：state 存「是否允许」，UI 展示取反为「禁止」
@@ -265,6 +276,18 @@ function ConfigCard() {
           ? data.userUploadLimitWindowMinutes
           : DEFAULT_UPLOAD_LIMIT_WINDOW
       );
+      setQryInterval(
+        typeof data.userQueryIntervalSeconds === "number" &&
+          data.userQueryIntervalSeconds >= 0
+          ? data.userQueryIntervalSeconds
+          : DEFAULT_QUERY_INTERVAL_SEC
+      );
+      setRptInterval(
+        typeof data.userReportIntervalMinutes === "number" &&
+          data.userReportIntervalMinutes >= 0
+          ? data.userReportIntervalMinutes
+          : DEFAULT_REPORT_INTERVAL_MIN
+      );
       setAutoRefill(Boolean(data.autoRefillEnabled));
       setManualUploadEnabled(
         typeof data.userManualUploadEnabled === "boolean"
@@ -348,6 +371,15 @@ function ConfigCard() {
       1440,
       Math.max(1, Math.round(Number(uLimitWindow) || DEFAULT_UPLOAD_LIMIT_WINDOW))
     );
+    // 查询/报表限流间隔允许 0=不限（不能用 || 兜底）
+    const qryRaw = Number(qryInterval);
+    const safeQryInterval = Number.isNaN(qryRaw)
+      ? DEFAULT_QUERY_INTERVAL_SEC
+      : Math.min(3600, Math.max(0, Math.round(qryRaw)));
+    const rptRaw = Number(rptInterval);
+    const safeRptInterval = Number.isNaN(rptRaw)
+      ? DEFAULT_REPORT_INTERVAL_MIN
+      : Math.min(1440, Math.max(0, Math.round(rptRaw)));
     setSaving(true);
     try {
       // naciPassword 留空 = 保持原密码不变（后端约定）
@@ -373,6 +405,8 @@ function ConfigCard() {
           userUploadLimitWindowMinutes: safeUWindow,
           userManualUploadEnabled: manualUploadEnabled,
           onlyHighPriorityEnabled: onlyHighPriority,
+          userQueryIntervalSeconds: safeQryInterval,
+          userReportIntervalMinutes: safeRptInterval,
         }),
       });
       toast.success("配置已保存");
@@ -404,7 +438,7 @@ function ConfigCard() {
   return (
     <Card
       title="系统配置"
-      subtitle="naci 账号密码（后端登录用，仅管理员可配）"
+      subtitle="naci 连接凭据与全部运行参数；字段说明悬停 ⓘ 查看"
       actions={
         <>
           <Button variant="secondary" onClick={ping} loading={pinging}>
@@ -419,284 +453,224 @@ function ConfigCard() {
       {loading ? (
         <LoadingRow />
       ) : (
-        <div className="space-y-5">
-          {/* —— 连接配置 —— */}
+        <div className="space-y-4">
           <ConfigSection title="连接配置" desc="naci 后端登录凭据与建渠道模型">
-            <div className="grid gap-3 md:grid-cols-2">
-              <Field label="naciBaseUrl">
+            <CompactField label="naciBaseUrl">
+              <TextInput
+                className="py-1.5"
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                placeholder="https://open.naci-tech.com"
+              />
+            </CompactField>
+            <CompactField label="登录用户名">
+              <TextInput
+                className="py-1.5"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="naci 登录用户名"
+                autoComplete="off"
+              />
+            </CompactField>
+            <CompactField
+              label="登录密码"
+              hint={hasPassword ? "已设置（留空则不修改）" : "未设置"}
+            >
+              <div className="flex gap-2">
                 <TextInput
-                  value={baseUrl}
-                  onChange={(e) => setBaseUrl(e.target.value)}
-                  placeholder="https://open.naci-tech.com"
+                  className="py-1.5"
+                  type={showPassword ? "text" : "password"}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder={hasPassword ? "已设置（留空不改）" : "未设置"}
+                  autoComplete="new-password"
                 />
-              </Field>
-              <Field label="登录用户名">
-                <TextInput
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  placeholder="naci 登录用户名"
-                  autoComplete="off"
-                />
-              </Field>
-              <Field
-                label="登录密码"
-                hint={hasPassword ? "已设置（留空则不修改）" : "未设置"}
-              >
-                <div className="flex gap-2">
-                  <TextInput
-                    type={showPassword ? "text" : "password"}
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder={hasPassword ? "已设置（留空不改）" : "未设置"}
-                    autoComplete="new-password"
-                  />
-                  <Button
-                    variant="secondary"
-                    type="button"
-                    onClick={() => setShowPassword((v) => !v)}
-                  >
-                    {showPassword ? "隐藏" : "显示"}
-                  </Button>
-                </div>
-              </Field>
-            </div>
-            <Field
+                <Button
+                  variant="secondary"
+                  type="button"
+                  className="!py-1.5"
+                  onClick={() => setShowPassword((v) => !v)}
+                >
+                  {showPassword ? "隐藏" : "显示"}
+                </Button>
+              </div>
+            </CompactField>
+            <CompactField
               label="模型列表"
               hint="新建渠道使用的模型，逗号分隔；默认 claude-opus-4-6,claude-opus-4-7,claude-opus-4-8"
             >
               <textarea
                 value={models}
                 onChange={(e) => setModels(e.target.value)}
-                rows={2}
+                rows={1}
                 placeholder={DEFAULT_MODELS}
-                className="w-full resize-y rounded-lg border border-slate-300 px-3 py-2 font-mono text-xs text-slate-800 outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100"
+                className="w-full resize-y rounded-lg border border-slate-300 px-3 py-1.5 font-mono text-xs text-slate-800 outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100"
               />
-            </Field>
+            </CompactField>
           </ConfigSection>
 
-          {/* —— 基础设置 —— */}
           <ConfigSection title="基础设置" desc="建渠道聚合数量与定时补给">
-            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
-              <Field
-                label="聚合 key 数量"
-                hint="每个新建渠道里聚合多少个 key（1~1000）"
-              >
-                <TextInput
-                  type="number"
-                  min={1}
-                  max={1000}
-                  value={Number.isNaN(batchSize) ? "" : batchSize}
-                  onChange={(e) => setBatchSize(e.target.valueAsNumber)}
-                  placeholder={String(DEFAULT_BATCH_SIZE)}
-                />
-              </Field>
-              <Field
-                label="每批处理数量"
-                hint="每轮/每次处理多少个 key，拆成 ⌈处理数/聚合数⌉ 个渠道（1~10000）"
-              >
-                <TextInput
-                  type="number"
-                  min={1}
-                  max={10000}
-                  value={Number.isNaN(processBatch) ? "" : processBatch}
-                  onChange={(e) => setProcessBatch(e.target.valueAsNumber)}
-                  placeholder={String(DEFAULT_PROCESS_BATCH)}
-                />
-              </Field>
-              <Field
-                label="补给间隔（分钟）"
-                hint="定时引擎每 N 分钟检查并按需补给一次，1~1440，改后下一轮生效"
-              >
-                <TextInput
-                  type="number"
-                  min={1}
-                  max={1440}
-                  value={Number.isNaN(intervalMin) ? "" : intervalMin}
-                  onChange={(e) => setIntervalMin(e.target.valueAsNumber)}
-                  placeholder={String(DEFAULT_INTERVAL_MINUTES)}
-                />
-              </Field>
-              <Field
-                label="自动建渠道"
-                hint="关闭后定时引擎不再自动建渠道；手动「上传一批 / 直接上传」按钮仍可用"
-              >
-                <label className="flex cursor-pointer items-center gap-2 py-2 text-sm text-slate-700">
-                  <input
-                    type="checkbox"
-                    checked={autoRefill}
-                    onChange={(e) => setAutoRefill(e.target.checked)}
-                    className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-400"
-                  />
-                  {autoRefill ? "已开启" : "已关闭"}
-                </label>
-              </Field>
-            </div>
+            <NumField
+              label="聚合 key 数量"
+              hint="每个新建渠道里聚合多少个 key（1~1000）"
+              min={1}
+              max={1000}
+              value={batchSize}
+              onChange={setBatchSize}
+              placeholder={String(DEFAULT_BATCH_SIZE)}
+            />
+            <NumField
+              label="每批处理数量"
+              hint="每轮/每次处理多少个 key，拆成 ⌈处理数/聚合数⌉ 个渠道（1~10000）"
+              min={1}
+              max={10000}
+              value={processBatch}
+              onChange={setProcessBatch}
+              placeholder={String(DEFAULT_PROCESS_BATCH)}
+            />
+            <NumField
+              label="补给间隔（分钟）"
+              hint="定时引擎每 N 分钟检查并按需补给一次，1~1440，改后下一轮生效"
+              min={1}
+              max={1440}
+              value={intervalMin}
+              onChange={setIntervalMin}
+              placeholder={String(DEFAULT_INTERVAL_MINUTES)}
+            />
+            <CheckField
+              label="自动建渠道"
+              hint="关闭后定时引擎不再自动建渠道；手动「上传一批 / 直接上传」按钮仍可用"
+              checked={autoRefill}
+              onChange={setAutoRefill}
+            />
           </ConfigSection>
 
-          {/* —— 高优先级渠道 —— */}
           <ConfigSection title="高优先级渠道" desc="优先级6配额与自动降级">
-            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
-              <Field
-                label="优先级6渠道上限"
-                hint="本地已建优先级6渠道达到此数即改用优先级5创建（账号配额6，0~1000）"
-              >
-                <TextInput
-                  type="number"
-                  min={0}
-                  max={1000}
-                  value={Number.isNaN(priority6Limit) ? "" : priority6Limit}
-                  onChange={(e) => setPriority6Limit(e.target.valueAsNumber)}
-                  placeholder={String(DEFAULT_PRIORITY6_LIMIT)}
-                />
-              </Field>
-              <Field
-                label="退化降级检测间隔（秒）"
-                hint="每 N 秒用一次 status-batch 检测高优先级渠道，任一站点禁用即降到5；下限5秒防打爆naci，5~86400"
-              >
-                <TextInput
-                  type="number"
-                  min={5}
-                  max={86400}
-                  value={Number.isNaN(demoteInterval) ? "" : demoteInterval}
-                  onChange={(e) => setDemoteInterval(e.target.valueAsNumber)}
-                  placeholder={String(DEFAULT_DEMOTE_INTERVAL_SEC)}
-                />
-              </Field>
-              <Field
-                label="退化判定宽限期（秒）"
-                hint="渠道建后超过此时长才纳入降级判定，避免刚建误判；0=建后即判，0~86400"
-              >
-                <TextInput
-                  type="number"
-                  min={0}
-                  max={86400}
-                  value={Number.isNaN(demoteGrace) ? "" : demoteGrace}
-                  onChange={(e) => setDemoteGrace(e.target.valueAsNumber)}
-                  placeholder={String(DEFAULT_DEMOTE_GRACE_SEC)}
-                />
-              </Field>
-              <Field
-                label="用量刷新频率（分钟）"
-                hint="后台每 N 分钟批量拉一次 used-quota 更新渠道用量缓存，1~1440"
-              >
-                <TextInput
-                  type="number"
-                  min={1}
-                  max={1440}
-                  value={Number.isNaN(usageRefresh) ? "" : usageRefresh}
-                  onChange={(e) => setUsageRefresh(e.target.valueAsNumber)}
-                  placeholder={String(DEFAULT_USAGE_REFRESH_MIN)}
-                />
-              </Field>
-              <Field
-                label="每渠道最多刷新用量次数"
-                hint="前 N 次按频率刷新，刷够后等 1 小时补最后一次，之后永久冻结；0=不刷新用量，0~100"
-              >
-                <TextInput
-                  type="number"
-                  min={0}
-                  max={100}
-                  value={Number.isNaN(usageMax) ? "" : usageMax}
-                  onChange={(e) => setUsageMax(e.target.valueAsNumber)}
-                  placeholder={String(DEFAULT_USAGE_MAX_UPDATES)}
-                />
-              </Field>
-              <Field
-                label="仅使用高优先级渠道"
-                hint="开启后只在有空闲优先级6名额时才建渠道（不降级到5）；名额满则 key 留池等回收，多用户按轮转公平分配"
-              >
-                <label className="flex cursor-pointer items-center gap-2 py-2 text-sm text-slate-700">
-                  <input
-                    type="checkbox"
-                    checked={onlyHighPriority}
-                    onChange={(e) => setOnlyHighPriority(e.target.checked)}
-                    className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-400"
-                  />
-                  {onlyHighPriority ? "已开启" : "已关闭"}
-                </label>
-              </Field>
-            </div>
+            <NumField
+              label="优先级6渠道上限"
+              hint="本地已建优先级6渠道达到此数即改用优先级5创建（账号配额6，0~1000）"
+              min={0}
+              max={1000}
+              value={priority6Limit}
+              onChange={setPriority6Limit}
+              placeholder={String(DEFAULT_PRIORITY6_LIMIT)}
+            />
+            <NumField
+              label="退化检测间隔（秒）"
+              hint="每 N 秒用一次 status-batch 检测高优先级渠道，任一站点禁用即降到5；下限5秒防打爆naci，5~86400"
+              min={5}
+              max={86400}
+              value={demoteInterval}
+              onChange={setDemoteInterval}
+              placeholder={String(DEFAULT_DEMOTE_INTERVAL_SEC)}
+            />
+            <NumField
+              label="退化判定宽限期（秒）"
+              hint="渠道建后超过此时长才纳入降级判定，避免刚建误判；0=建后即判，0~86400"
+              min={0}
+              max={86400}
+              value={demoteGrace}
+              onChange={setDemoteGrace}
+              placeholder={String(DEFAULT_DEMOTE_GRACE_SEC)}
+            />
+            <NumField
+              label="用量刷新频率（分钟）"
+              hint="后台每 N 分钟批量拉一次 used-quota 更新渠道用量缓存，1~1440"
+              min={1}
+              max={1440}
+              value={usageRefresh}
+              onChange={setUsageRefresh}
+              placeholder={String(DEFAULT_USAGE_REFRESH_MIN)}
+            />
+            <NumField
+              label="每渠道最多刷新次数"
+              hint="前 N 次按频率刷新，刷够后等 1 小时补最后一次，之后永久冻结；0=不刷新用量，0~100"
+              min={0}
+              max={100}
+              value={usageMax}
+              onChange={setUsageMax}
+              placeholder={String(DEFAULT_USAGE_MAX_UPDATES)}
+            />
+            <CheckField
+              label="仅使用高优先级渠道"
+              hint="开启后只在有空闲优先级6名额时才建渠道（不降级到5）；名额满则 key 留池等回收，多用户按轮转公平分配"
+              checked={onlyHighPriority}
+              onChange={setOnlyHighPriority}
+            />
           </ConfigSection>
 
-          {/* —— 上传限速与管控 —— */}
-          <ConfigSection title="上传限速与管控" desc="全站限速与「禁止用户手动上传」总开关">
-            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
-              <Field
-                label="全局上传限速·个数"
-                hint="滚动窗口内全站最多上传多少个 key；0=不限速"
-              >
-                <TextInput
-                  type="number"
-                  min={0}
-                  max={1000000}
-                  value={Number.isNaN(gLimitCount) ? "" : gLimitCount}
-                  onChange={(e) => setGLimitCount(e.target.valueAsNumber)}
-                  placeholder={String(DEFAULT_UPLOAD_LIMIT_COUNT)}
-                />
-              </Field>
-              <Field
-                label="全局限速窗口（分钟）"
-                hint="全局限速的滚动窗口长度，1~1440；格式即「N 分钟最多 X 个」"
-              >
-                <TextInput
-                  type="number"
-                  min={1}
-                  max={1440}
-                  value={Number.isNaN(gLimitWindow) ? "" : gLimitWindow}
-                  onChange={(e) => setGLimitWindow(e.target.valueAsNumber)}
-                  placeholder={String(DEFAULT_UPLOAD_LIMIT_WINDOW)}
-                />
-              </Field>
-              <Field
-                label="禁止用户手动上传"
-                hint="开启后普通用户不能手动「上传一批 / 直接上传」，只能录入本地库，由引擎自动推站点；管理员代传不受限"
-              >
-                <label className="flex cursor-pointer items-center gap-2 py-2 text-sm text-slate-700">
-                  <input
-                    type="checkbox"
-                    checked={!manualUploadEnabled}
-                    onChange={(e) => setManualUploadEnabled(!e.target.checked)}
-                    className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-400"
-                  />
-                  {manualUploadEnabled ? "未禁止（用户可手动）" : "已禁止"}
-                </label>
-              </Field>
-            </div>
-          </ConfigSection>
-
-          {/* —— 默认用户设置 —— */}
           <ConfigSection
-            title="默认用户设置"
-            desc="新用户默认上传限速（可在编辑用户时对个别用户单独覆盖）"
+            title="上传限速与管控"
+            desc="全站限速与「禁止用户手动上传」总开关"
           >
-            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
-              <Field
-                label="用户默认限速·个数"
-                hint="每个用户窗口内最多上传多少个 key；0=不限速"
-              >
-                <TextInput
-                  type="number"
-                  min={0}
-                  max={1000000}
-                  value={Number.isNaN(uLimitCount) ? "" : uLimitCount}
-                  onChange={(e) => setULimitCount(e.target.valueAsNumber)}
-                  placeholder={String(DEFAULT_UPLOAD_LIMIT_COUNT)}
-                />
-              </Field>
-              <Field
-                label="用户默认限速窗口（分钟）"
-                hint="用户默认限速的滚动窗口长度，1~1440"
-              >
-                <TextInput
-                  type="number"
-                  min={1}
-                  max={1440}
-                  value={Number.isNaN(uLimitWindow) ? "" : uLimitWindow}
-                  onChange={(e) => setULimitWindow(e.target.valueAsNumber)}
-                  placeholder={String(DEFAULT_UPLOAD_LIMIT_WINDOW)}
-                />
-              </Field>
-            </div>
+            <NumField
+              label="全局上传限速·个数"
+              hint="滚动窗口内全站最多上传多少个 key；0=不限速"
+              min={0}
+              max={1000000}
+              value={gLimitCount}
+              onChange={setGLimitCount}
+              placeholder={String(DEFAULT_UPLOAD_LIMIT_COUNT)}
+            />
+            <NumField
+              label="全局限速窗口（分钟）"
+              hint="全局限速的滚动窗口长度，1~1440；格式即「N 分钟最多 X 个」"
+              min={1}
+              max={1440}
+              value={gLimitWindow}
+              onChange={setGLimitWindow}
+              placeholder={String(DEFAULT_UPLOAD_LIMIT_WINDOW)}
+            />
+            <CheckField
+              label="禁止用户手动上传"
+              hint="开启后普通用户不能手动「上传一批 / 直接上传」，只能录入本地库，由引擎自动推站点；管理员代传不受限"
+              checked={!manualUploadEnabled}
+              onChange={(v) => setManualUploadEnabled(!v)}
+              onText="已禁止"
+              offText="未禁止（用户可手动）"
+            />
+          </ConfigSection>
+
+          <ConfigSection
+            title="默认用户与查询限流"
+            desc="新用户默认上传限速（可按用户覆盖）；渠道查询/报表下载限流（Redis 桶）"
+          >
+            <NumField
+              label="用户默认限速·个数"
+              hint="每个用户窗口内最多上传多少个 key；0=不限速"
+              min={0}
+              max={1000000}
+              value={uLimitCount}
+              onChange={setULimitCount}
+              placeholder={String(DEFAULT_UPLOAD_LIMIT_COUNT)}
+            />
+            <NumField
+              label="用户默认限速窗口（分钟）"
+              hint="用户默认限速的滚动窗口长度，1~1440"
+              min={1}
+              max={1440}
+              value={uLimitWindow}
+              onChange={setULimitWindow}
+              placeholder={String(DEFAULT_UPLOAD_LIMIT_WINDOW)}
+            />
+            <NumField
+              label="查询限流间隔（秒）"
+              hint="用户渠道列表每 N 秒最多查询一次，超频直接报错；0=不限，0~3600"
+              min={0}
+              max={3600}
+              value={qryInterval}
+              onChange={setQryInterval}
+              placeholder={String(DEFAULT_QUERY_INTERVAL_SEC)}
+            />
+            <NumField
+              label="报表限流间隔（分钟）"
+              hint="用户报表每 N 分钟最多下载一次，超频直接报错；0=不限，0~1440"
+              min={0}
+              max={1440}
+              value={rptInterval}
+              onChange={setRptInterval}
+              placeholder={String(DEFAULT_REPORT_INTERVAL_MIN)}
+            />
           </ConfigSection>
 
           {pingUser && (
@@ -710,7 +684,7 @@ function ConfigCard() {
   );
 }
 
-/** 系统配置分区：标题 + 说明 + 一组字段，用细分隔与留白区分不同类别，便于查看。 */
+/** 系统配置分区（紧凑版）：标题与说明同一行，分区间细分隔线，字段直接排进密格栅。 */
 function ConfigSection({
   title,
   desc,
@@ -721,13 +695,104 @@ function ConfigSection({
   children: ReactNode;
 }) {
   return (
-    <section className="rounded-xl border border-slate-200 bg-slate-50/40 p-4">
-      <div className="mb-3">
+    <section className="border-t border-slate-100 pt-3 first:border-t-0 first:pt-0">
+      <div className="mb-2 flex flex-wrap items-baseline gap-x-2">
         <h4 className="text-sm font-semibold text-slate-800">{title}</h4>
-        {desc && <p className="mt-0.5 text-xs text-slate-400">{desc}</p>}
+        {desc && <span className="text-xs text-slate-400">{desc}</span>}
       </div>
-      <div className="space-y-3">{children}</div>
+      <div className="grid gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        {children}
+      </div>
     </section>
+  );
+}
+
+/** 紧凑字段：长说明收进 ⓘ 的悬停提示（title），不再在输入框下占多行文字。 */
+function CompactField({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: ReactNode;
+}) {
+  return (
+    <label className="block" title={hint}>
+      <span className="mb-1 flex items-center gap-1 text-[13px] font-medium text-slate-700">
+        {label}
+        {hint && (
+          <span className="cursor-help text-xs text-slate-300 hover:text-slate-500">
+            ⓘ
+          </span>
+        )}
+      </span>
+      {children}
+    </label>
+  );
+}
+
+/** 紧凑数字输入字段（NaN 显示为空串，valueAsNumber 回写）。 */
+function NumField({
+  label,
+  hint,
+  min,
+  max,
+  value,
+  onChange,
+  placeholder,
+}: {
+  label: string;
+  hint?: string;
+  min: number;
+  max: number;
+  value: number;
+  onChange: (n: number) => void;
+  placeholder?: string;
+}) {
+  return (
+    <CompactField label={label} hint={hint}>
+      <TextInput
+        type="number"
+        min={min}
+        max={max}
+        className="py-1.5"
+        value={Number.isNaN(value) ? "" : value}
+        onChange={(e) => onChange(e.target.valueAsNumber)}
+        placeholder={placeholder}
+      />
+    </CompactField>
+  );
+}
+
+/** 紧凑开关字段（高度与输入框对齐，保持行高一致）。 */
+function CheckField({
+  label,
+  hint,
+  checked,
+  onChange,
+  onText = "已开启",
+  offText = "已关闭",
+}: {
+  label: string;
+  hint?: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  onText?: string;
+  offText?: string;
+}) {
+  return (
+    <CompactField label={label} hint={hint}>
+      <span className="flex h-[34px] cursor-pointer items-center gap-2 text-sm text-slate-700">
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+          className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-400"
+        />
+        {checked ? onText : offText}
+      </span>
+    </CompactField>
   );
 }
 

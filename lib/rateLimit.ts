@@ -226,12 +226,22 @@ export async function reserveBucket(
   want: number,
   windowMinutes: number,
 ): Promise<{ granted: number; members: string[] }> {
+  return reserveBucketMs(scope, limit, want, Math.max(1, windowMinutes) * 60_000);
+}
+
+/** 同 reserveBucket，但窗口按毫秒给（供秒级限流用，如「每 3 秒一次查询」）。 */
+export async function reserveBucketMs(
+  scope: string,
+  limit: number,
+  want: number,
+  windowMs: number,
+): Promise<{ granted: number; members: string[] }> {
   if (want <= 0) return { granted: 0, members: [] };
-  const windowMs = Math.max(1, windowMinutes) * 60_000;
+  const win = Math.max(1000, windowMs);
   const r = getRedis();
   if (r) {
     try {
-      const res = await redisReserve(r, scope, limit, want, windowMs);
+      const res = await redisReserve(r, scope, limit, want, win);
       noteBackend("redis");
       return res;
     } catch (err) {
@@ -240,7 +250,32 @@ export async function reserveBucket(
   } else {
     noteBackend("memory");
   }
-  return memReserve(scope, limit, want, windowMs);
+  return memReserve(scope, limit, want, win);
+}
+
+/**
+ * 该 scope 窗口内最早一次占用还有多久过期（毫秒；桶空返回 0）。
+ * 占桶失败（429）时用它告诉用户还要等多久。
+ */
+export async function bucketRetryAfterMs(
+  scope: string,
+  windowMs: number,
+): Promise<number> {
+  const now = Date.now();
+  const r = getRedis();
+  if (r) {
+    try {
+      const res = await r.zrange(KEY_PREFIX + scope, 0, 0, "WITHSCORES");
+      noteBackend("redis");
+      if (res.length < 2) return 0;
+      return Math.max(0, Number(res[1]) + windowMs - now);
+    } catch (err) {
+      noteBackend("memory", err);
+    }
+  }
+  const list = memPrune(scope, windowMs);
+  if (list.length === 0) return 0;
+  return Math.max(0, list[0].ts + windowMs - now);
 }
 
 /** 退还此前预占的额度（回滚 / 找零）。members 为 reserveBucket 返回的成员子集。 */

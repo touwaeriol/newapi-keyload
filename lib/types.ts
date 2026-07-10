@@ -83,6 +83,10 @@ export interface SystemConfig {
   userUploadLimitWindowMinutes: number;
   /** 是否允许普通用户手动上传（「上传一批」「直接上传」）。false=只能录入本地库，由引擎自动推站点 */
   userManualUploadEnabled: boolean;
+  /** 用户渠道查询限流：每 N 秒最多查询一次（0=不限，1~3600；Redis 滑动窗口桶） */
+  userQueryIntervalSeconds: number;
+  /** 用户报表拉取限流：每 N 分钟最多下载一次（0=不限，1~1440；Redis 滑动窗口桶） */
+  userReportIntervalMinutes: number;
   /**
    * 仅使用高优先级渠道模式：开启后**只在有空闲优先级6名额时**才建渠道（强制优先级6，不降级到5），
    * 名额满则 key 留池等待降级任务回收后再建；多用户竞争时空闲名额按轮转公平分配。
