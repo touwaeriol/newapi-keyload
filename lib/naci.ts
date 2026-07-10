@@ -638,10 +638,17 @@ export async function getChannelStatusFull(id: number): Promise<{
   };
 }
 
+/** status-batch 单请求 id 分块大小（避免一个前缀几千渠道一次性请求把 naci 打爆/超时）。 */
+const STATUS_BATCH_CHUNK = 40;
+/** status-batch 分块之间的节流（ms），削峰降低 429。 */
+const STATUS_BATCH_CHUNK_DELAY_MS = 300;
+
 /**
  * 一次 status-batch 读取**多个**渠道的每站状态 + key 统计（新模型：一个前缀有多个已建渠道）。
+ * **内部按 STATUS_BATCH_CHUNK 分块**多次请求再合并——一个前缀可能有成千上万个渠道，
+ * 单请求塞全部 id 会让 naci 超时/500/429；分块后每次只带 ≤40 个 id。
  * 只对响应里确有该 id 的条目解析（避免 parseStatusBatch 的单 id 兜底把别的条目错配给缺失 id）。
- * naci 读失败会抛出，由调用方兜底。
+ * 任一分块读失败会抛出（由调用方兜底：demote 跳过本轮、用量任务跳过本块、视图保留旧缓存）。
  */
 export async function getChannelsStatusBatch(ids: number[]): Promise<
   Map<
@@ -666,25 +673,32 @@ export async function getChannelsStatusBatch(ids: number[]): Promise<
     }
   >();
   if (ids.length === 0) return out;
-  const env = await naciFetch<Record<string, unknown>>(
-    "POST",
-    "/api/admin-hub/channels/status-batch",
-    { ids }
-  );
-  const data = (env.data ?? {}) as Record<string, unknown>;
-  for (const id of ids) {
-    if (!(String(id) in data)) continue;
-    const parsed = parseStatusBatch(data, id);
-    if (!parsed) continue;
-    out.set(id, {
-      sites: Array.from(parsed.siteStatus.entries()).map(
-        ([site_id, status]) => ({ site_id, status })
-      ),
-      multiKeySize: parsed.multiKeySize,
-      aliveCount: parsed.aliveCount,
-      deadCount: parsed.deadCount,
-      hasKeyInfo: parsed.hasKeyInfo,
-    });
+
+  for (let i = 0; i < ids.length; i += STATUS_BATCH_CHUNK) {
+    const chunk = ids.slice(i, i + STATUS_BATCH_CHUNK);
+    const env = await naciFetch<Record<string, unknown>>(
+      "POST",
+      "/api/admin-hub/channels/status-batch",
+      { ids: chunk }
+    );
+    const data = (env.data ?? {}) as Record<string, unknown>;
+    for (const id of chunk) {
+      if (!(String(id) in data)) continue;
+      const parsed = parseStatusBatch(data, id);
+      if (!parsed) continue;
+      out.set(id, {
+        sites: Array.from(parsed.siteStatus.entries()).map(
+          ([site_id, status]) => ({ site_id, status })
+        ),
+        multiKeySize: parsed.multiKeySize,
+        aliveCount: parsed.aliveCount,
+        deadCount: parsed.deadCount,
+        hasKeyInfo: parsed.hasKeyInfo,
+      });
+    }
+    if (i + STATUS_BATCH_CHUNK < ids.length) {
+      await sleep(STATUS_BATCH_CHUNK_DELAY_MS);
+    }
   }
   return out;
 }

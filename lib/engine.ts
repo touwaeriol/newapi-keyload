@@ -9,7 +9,6 @@ import {
   createChannelFromNextBatch,
   createChannelsDrain,
   demoteAllDegradedChannels,
-  reconcileTrackedPriorities,
   refreshChannelUsage,
   refreshPrefixRealtime,
 } from "./channelService";
@@ -17,7 +16,6 @@ import {
   channelsWithPending,
   clampDemoteIntervalSeconds,
   clampIntervalMinutes,
-  clampPriorityTaskIntervalMinutes,
   clampUsageRefreshIntervalMinutes,
   countChannelsAtPriorityForPrefix,
   findUserByChannelName,
@@ -31,10 +29,6 @@ import { FIXED_PRIORITY } from "./supplier";
 /** 补给间隔默认值（分钟）——首个 tick 读到配置前的兜底，与 store 的 seed 一致。 */
 const DEFAULT_INTERVAL_MS = 60_000;
 const INITIAL_DELAY_MS = 5_000;
-/** 优先级降级全局任务默认间隔（ms）——首轮读到配置前的兜底，与 store seed(5 分钟)一致。 */
-const DEFAULT_PRIORITY_INTERVAL_MS = 5 * 60_000;
-/** 优先级对账任务首次延迟（ms）：错开补给引擎首轮，避开建渠道与对账同时抢 naci。 */
-const PRIORITY_INITIAL_DELAY_MS = 20_000;
 /** 退化降级快循环默认间隔（ms）：读到配置(demoteIntervalSeconds)前的兜底，与 store seed(30s)一致。 */
 const DEMOTE_FAST_INTERVAL_MS = 30_000;
 /** 退化降级快循环首次延迟（ms）：错开补给(5s)与对账(20s)首轮。 */
@@ -61,11 +55,6 @@ interface EngineState {
   nextTickAt: number | null; // 预计下次调度时间戳(ms)
   intervalMs: number; // 当前生效的补给间隔(ms)，每轮 tick 从配置刷新
   lastResults: Record<string, LastCheckResult>; // 按前缀记录最近一次检查结果
-  // —— 优先级对账全局任务（独立自调度定时器，间隔由 priorityTaskIntervalMinutes 配置） ——
-  priorityRunning: boolean; // 防重入（对账）
-  priorityTimer: ReturnType<typeof setTimeout> | null;
-  priorityIntervalMs: number; // 当前生效的对账任务间隔(ms)
-  lastPriorityRunAt: number | null; // 上次对账任务完成时间戳(ms)
   // —— 退化降级快循环（间隔由 demoteIntervalSeconds 配置，独立定时器） ——
   demoteRunning: boolean; // 防重入（降级）
   demoteTimer: ReturnType<typeof setTimeout> | null;
@@ -89,10 +78,6 @@ function engineState(): EngineState {
       nextTickAt: null,
       intervalMs: DEFAULT_INTERVAL_MS,
       lastResults: {},
-      priorityRunning: false,
-      priorityTimer: null,
-      priorityIntervalMs: DEFAULT_PRIORITY_INTERVAL_MS,
-      lastPriorityRunAt: null,
       demoteRunning: false,
       demoteTimer: null,
       demoteIntervalMs: DEMOTE_FAST_INTERVAL_MS,
@@ -106,8 +91,6 @@ function engineState(): EngineState {
     if (!g.__keyloadEngine.lastResults) g.__keyloadEngine.lastResults = {};
     if (!g.__keyloadEngine.intervalMs)
       g.__keyloadEngine.intervalMs = DEFAULT_INTERVAL_MS;
-    if (!g.__keyloadEngine.priorityIntervalMs)
-      g.__keyloadEngine.priorityIntervalMs = DEFAULT_PRIORITY_INTERVAL_MS;
   }
   return g.__keyloadEngine;
 }
@@ -430,35 +413,6 @@ async function runAndReschedule(): Promise<void> {
 }
 
 /**
- * 优先级对账任务（慢循环，分钟级）：把本地「假6」同步为 naci 真实优先级
- * （naci 静默降级会留下漂移，卡死配额）。对账后本地计数准确，退化降级(快循环)只处理真正还在优先级6的渠道。
- * 独立于补给引擎，间隔由 priorityTaskIntervalMinutes 配置；priorityRunning 防重入。
- */
-async function runReconcileTask(): Promise<void> {
-  const state = engineState();
-  if (state.priorityRunning) return;
-  state.priorityRunning = true;
-  try {
-    const cfg = await getConfig();
-    state.priorityIntervalMs =
-      clampPriorityTaskIntervalMinutes(cfg.priorityTaskIntervalMinutes) * 60_000;
-    const reconciled = await reconcileTrackedPriorities();
-    if (reconciled > 0) {
-      await safeLog(
-        "info",
-        undefined,
-        `优先级对账：修正 ${reconciled} 个渠道的本地优先级（同步 naci 实际值，释放被假6占用的配额）`
-      );
-    }
-  } catch (err) {
-    console.error("[engine] 优先级对账任务失败:", err);
-  } finally {
-    state.priorityRunning = false;
-    state.lastPriorityRunAt = Date.now();
-  }
-}
-
-/**
  * 退化降级快循环（间隔由 demoteIntervalSeconds 配置，默认 30s）：直接用一次 status-batch 读
  * 「本地记为高优先级(>5)」的渠道状态，任一站点被禁用即降到 5，腾出稀缺的优先级配额。
  * 仅高优先级模式下降级后立即补建。demoteRunning 防重入。
@@ -498,23 +452,6 @@ async function runDemoteTask(): Promise<void> {
   } finally {
     state.demoteRunning = false;
     state.lastDemoteRunAt = Date.now();
-  }
-}
-
-/** 跑一次优先级对账并按当前生效间隔安排下一次（自调度 setTimeout 链）。 */
-async function runReconcileAndReschedule(): Promise<void> {
-  const state = engineState();
-  try {
-    await runReconcileTask();
-  } finally {
-    const delay =
-      state.priorityIntervalMs > 0
-        ? state.priorityIntervalMs
-        : DEFAULT_PRIORITY_INTERVAL_MS;
-    if (state.priorityTimer) clearTimeout(state.priorityTimer);
-    state.priorityTimer = setTimeout(() => {
-      void runReconcileAndReschedule();
-    }, delay);
   }
 }
 
@@ -587,22 +524,17 @@ export function startEngine(): void {
     void runAndReschedule();
   }, INITIAL_DELAY_MS);
 
-  // 优先级对账任务（慢循环，分钟级；独立定时器，错开补给首轮）
-  state.priorityTimer = setTimeout(() => {
-    void runReconcileAndReschedule();
-  }, PRIORITY_INITIAL_DELAY_MS);
-
-  // 退化降级快循环（间隔按配置 demoteIntervalSeconds；独立定时器，错开补给与对账首轮）
+  // 退化降级快循环（间隔按配置 demoteIntervalSeconds；独立定时器，错开补给首轮）
   state.demoteTimer = setTimeout(() => {
     void runDemoteAndReschedule();
   }, DEMOTE_INITIAL_DELAY_MS);
 
-  // 用量刷新任务（间隔按配置 usageRefreshIntervalMinutes；每渠道刷够上限即冻结防雪崩）
+  // 用量+状态刷新任务（间隔按配置 usageRefreshIntervalMinutes；每渠道刷够上限即冻结防雪崩）
   state.usageTimer = setTimeout(() => {
     void runUsageAndReschedule();
   }, USAGE_INITIAL_DELAY_MS);
 
   console.log(
-    "[engine] 定时建渠道引擎 + 优先级对账(分钟级) + 退化降级(可配秒级) + 用量刷新(可配分钟级) 已启动"
+    "[engine] 定时建渠道引擎 + 退化降级(可配秒级) + 用量与状态刷新(可配分钟级) 已启动"
   );
 }

@@ -338,6 +338,11 @@ async function createTables(pool: Pool): Promise<void> {
   await pool.query(
     `ALTER TABLE created_channels ADD COLUMN IF NOT EXISTS usage_updated_at timestamptz`
   );
+  // 每渠道状态快照缓存（站点状态 + key 存活统计）。与用量共用同一套「后台按频率刷、刷够
+  // usage_max_updates 次即冻结」机制：实时视图直接读该缓存，不再每次翻页都实时打 naci status-batch。
+  await pool.query(
+    `ALTER TABLE created_channels ADD COLUMN IF NOT EXISTS status_json jsonb`
+  );
   // 每个已建渠道在各站点的远程渠道 id / 名称（来自 naci 创建响应 publish_results）。
   // created_channel_id 引用 created_channels.id；渠道占位行删除时级联清理。
   await pool.query(`
@@ -981,6 +986,15 @@ export async function channelsWithPending(): Promise<string[]> {
 
 // —— 已创建渠道（新模型：每上传一批建一个新渠道） ——
 
+/** 每渠道状态快照（站点状态 + key 存活统计）——与 naci getChannelsStatusBatch 单渠道结果同构，缓存落库。 */
+export interface ChannelStatusSnapshot {
+  sites: { site_id: number; status: number }[];
+  multiKeySize: number;
+  aliveCount: number;
+  deadCount: number;
+  hasKeyInfo: boolean;
+}
+
 export interface CreatedChannel {
   id: string;
   prefix: string;
@@ -994,6 +1008,8 @@ export interface CreatedChannel {
   usedQuota: number | null;
   /** 已刷新用量的次数（刷够 usage_max_updates 即冻结不再拉）。 */
   usageUpdateCount: number;
+  /** 缓存的状态快照（后台任务/降级/手动同步写入；null=尚未拉取）。 */
+  statusJson: ChannelStatusSnapshot | null;
   createdAt: string;
 }
 
@@ -1007,6 +1023,7 @@ interface CreatedChannelRow {
   priority: number;
   used_quota: string | number | null;
   usage_update_count: number | null;
+  status_json: ChannelStatusSnapshot | null;
   created_at: Date | string;
 }
 
@@ -1021,6 +1038,7 @@ function rowToCreatedChannel(r: CreatedChannelRow): CreatedChannel {
     priority: Number(r.priority),
     usedQuota: r.used_quota == null ? null : Number(r.used_quota),
     usageUpdateCount: Number(r.usage_update_count ?? 0),
+    statusJson: r.status_json ?? null,
     createdAt: toIso(r.created_at),
   };
 }
@@ -1127,34 +1145,74 @@ export async function listChannelsNeedingUsageRefresh(
   return rows.map(rowToCreatedChannel);
 }
 
-/** 写回单个渠道的用量缓存并把刷新计数 +1（后台用量任务用）。 */
+/**
+ * 写回单个渠道的用量缓存并把刷新计数 +1（后台用量任务用）。
+ * 可选同时写状态快照 status（后台任务同一块里顺带拉到的 status-batch 结果）：
+ * status 省略(undefined)则不动 status_json（本块状态拉取失败时保留旧快照）；传入则覆盖。
+ */
 export async function recordChannelUsage(
   channelId: number,
-  usedQuota: number
+  usedQuota: number,
+  status?: ChannelStatusSnapshot | null
+): Promise<void> {
+  const pool = await ensureReady();
+  const quota = Math.max(0, Math.round(usedQuota));
+  if (status === undefined) {
+    await pool.query(
+      `UPDATE created_channels
+          SET used_quota = $2, usage_update_count = usage_update_count + 1, usage_updated_at = now()
+        WHERE channel_id = $1`,
+      [channelId, quota]
+    );
+    return;
+  }
+  await pool.query(
+    `UPDATE created_channels
+        SET used_quota = $2, status_json = $3::jsonb,
+            usage_update_count = usage_update_count + 1, usage_updated_at = now()
+      WHERE channel_id = $1`,
+    [channelId, quota, status === null ? null : JSON.stringify(status)]
+  );
+}
+
+/** 只写回单个渠道的状态快照（供退化降级任务把顺手读到的 status-batch 结果落缓存，保持 P6 新鲜）。 */
+export async function setChannelStatusByChannelId(
+  channelId: number,
+  status: ChannelStatusSnapshot
 ): Promise<void> {
   const pool = await ensureReady();
   await pool.query(
-    `UPDATE created_channels
-        SET used_quota = $2, usage_update_count = usage_update_count + 1, usage_updated_at = now()
-      WHERE channel_id = $1`,
-    [channelId, Math.max(0, Math.round(usedQuota))]
+    `UPDATE created_channels SET status_json = $2::jsonb WHERE channel_id = $1`,
+    [channelId, JSON.stringify(status)]
   );
 }
 
 /**
  * 写回单个渠道的用量缓存但**不动**刷新计数（用户手动同步用）：
  * 手动同步是按需、单前缀触发，不受「自动最多刷 N 次」上限约束，也不消耗该配额。
+ * 可选同时写状态快照 status（手动同步顺带实时拉到的 status-batch 结果）。
  */
 export async function setChannelUsage(
   channelId: number,
-  usedQuota: number
+  usedQuota: number,
+  status?: ChannelStatusSnapshot | null
 ): Promise<void> {
   const pool = await ensureReady();
+  const quota = Math.max(0, Math.round(usedQuota));
+  if (status === undefined) {
+    await pool.query(
+      `UPDATE created_channels
+          SET used_quota = $2, usage_updated_at = now()
+        WHERE channel_id = $1`,
+      [channelId, quota]
+    );
+    return;
+  }
   await pool.query(
     `UPDATE created_channels
-        SET used_quota = $2, usage_updated_at = now()
+        SET used_quota = $2, status_json = $3::jsonb, usage_updated_at = now()
       WHERE channel_id = $1`,
-    [channelId, Math.max(0, Math.round(usedQuota))]
+    [channelId, quota, status === null ? null : JSON.stringify(status)]
   );
 }
 

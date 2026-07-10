@@ -7,7 +7,6 @@
 // 定时引擎（lib/engine.ts）在开启自动补给时，把仍有 pending 的前缀逐批建成新渠道。
 import {
   createChannel,
-  getChannel,
   getChannelSites,
   getChannelsStatusBatch,
   getChannelsUsedQuota,
@@ -45,6 +44,7 @@ import {
   recordCreatedChannelSites,
   recordUploadedKeys,
   releaseClaim,
+  setChannelStatusByChannelId,
   setChannelUsage,
   sumChannelUsedQuotaByPrefix,
   updateCreatedChannelPriority,
@@ -719,9 +719,10 @@ function rtCache(): {
 }
 
 /**
- * 真实拉取某前缀所有已建渠道的实时视图（一次 status-batch 读站点/key 状态）。
- * 用量(used_quota) **不再实时拉** naci —— 改读 created_channels 缓存列（由后台用量任务按频率+次数上限刷新，
- * 避免每次实时视图都对全部渠道拉 used-quota 造成雪崩）。usedAmount = 缓存 used_quota / QUOTA_PER_USD。
+ * 组装某前缀所有已建渠道的实时视图。**不再实时打 naci**——站点/key 状态与用量都改读
+ * created_channels 缓存列（status_json / used_quota，由后台任务按频率+次数上限刷新、降级/手动同步顺带刷）。
+ * 一个前缀可能有成千上万个渠道，若每次翻页/轮询都对全部渠道实时拉 status-batch + used-quota，会把 naci 打爆；
+ * 缓存 + 有限次数冻结（像用量那样）后，视图变成纯本地库读取。usedAmount = 缓存 used_quota / QUOTA_PER_USD。
  */
 async function fetchPrefixRealtime(user: User): Promise<PrefixRealtime> {
   const prefix = user.channelName.trim();
@@ -730,19 +731,8 @@ async function fetchPrefixRealtime(user: User): Promise<PrefixRealtime> {
     .map((c) => c.channelId)
     .filter((id): id is number => typeof id === "number");
 
-  let statusMap: Awaited<ReturnType<typeof getChannelsStatusBatch>> = new Map();
-  // status-batch 是否**真正成功**：失败(catch)返回空 map，但不得据此把已缓存统计清零(M-1)。
-  let statusOk = false;
   // 各已建渠道的每站远程 id（本地库，publish_results 落库）
   const siteMap = await createdChannelSitesByChannel(created.map((c) => c.id));
-  if (ids.length > 0) {
-    statusMap = await getChannelsStatusBatch(ids)
-      .then((m) => {
-        statusOk = true;
-        return m;
-      })
-      .catch(() => new Map());
-  }
 
   let totalPlatformKey = 0;
   let totalDeadKey = 0;
@@ -751,8 +741,8 @@ async function fetchPrefixRealtime(user: User): Promise<PrefixRealtime> {
   let totalUsedAmount = 0;
 
   const channels: CreatedChannelView[] = created.map((c) => {
-    const st = c.channelId != null ? statusMap.get(c.channelId) : undefined;
-
+    // 状态取缓存快照（后台任务/降级/手动同步写入）；null=尚未刷新，展示为「无 key 信息」。
+    const st = c.statusJson;
     const hasKey = !!st && st.hasKeyInfo;
     const platformKeyCount = hasKey ? st!.multiKeySize : null;
     const deadKeyCount = hasKey ? st!.deadCount : null;
@@ -791,16 +781,12 @@ async function fetchPrefixRealtime(user: User): Promise<PrefixRealtime> {
     };
   });
 
-  // 聚合统计写回用户缓存（供管理员列表复用）——仅在对应拉取**真正成功**时写，
-  // 失败(catch 空 map) 保留旧缓存值，避免瞬时故障把正常统计清成 0（M-1）。
-  if (ids.length > 0 && statusOk) {
+  // 聚合统计写回用户缓存（供管理员列表复用）——均来自缓存列（后台任务维护），直接写回。
+  if (ids.length > 0) {
     await updateUserKeyStats(user.id, {
       platformKeyCount: totalPlatformKey,
       deadKeyCount: totalDeadKey,
     });
-  }
-  // 用量聚合来自缓存列（后台任务维护），直接写回用户缓存供管理员列表复用。
-  if (ids.length > 0) {
     await updateUserUsedQuota(user.id, totalUsedQuota);
   }
 
@@ -896,6 +882,13 @@ export async function demoteAllDegradedChannels(): Promise<number> {
   for (const c of candidates) {
     const st = statusMap.get(c.channelId as number);
     if (!st) continue;
+    // 顺带把刚读到的状态快照落缓存，让实时视图里的 P6 渠道保持新鲜（不额外发请求）。
+    try {
+      await setChannelStatusByChannelId(c.channelId as number, st);
+      affectedPrefixes.add(c.prefix);
+    } catch {
+      // 状态缓存写入失败不影响降级主流程
+    }
     const channelExhausted =
       st.hasKeyInfo && st.multiKeySize > 0 && st.aliveCount === 0;
     // 运营决策：**任意一个站点**被禁用(2)/自动禁用(3)即视为退化 → 降级。
@@ -971,55 +964,11 @@ export async function demoteChannelManually(
   return { channelName: rec.channelName, from: rec.priority, to: DEMOTED_PRIORITY };
 }
 
-/** 对账逐个读 naci 详情间的节流（毫秒），避免触发 429。 */
-const RECONCILE_REQ_DELAY_MS = 300;
-
-/**
- * 优先级对账：**只检查本地记录为优先级 6 的渠道**（我们建 6 时已记录在
- * created_channels.priority，降级/手动回退时同步更新——这份记录就是唯一枚举源），
- * 逐个用 `getChannel(id)` 详情读 naci 真实优先级，若 naci 已（静默）降到 5 则同步本地，
- * 释放被「假6」占用的配额。
- *
- * 之前每轮扫最近 80 个渠道找双向漂移，naci 请求量太大（1 分钟一轮 → 持续 429）。
- * 现在每轮请求数 ≤ priority6Limit（个位数）。代价：本地记 5 但 naci 实际 6 的「假5」
- * 不再被自动发现——该方向漂移极少（建渠道以我们下发的优先级为准），发现后可用
- * 「回退P5」按钮手动纠正。返回同步条数。
- */
-export async function reconcileTrackedPriorities(): Promise<number> {
-  const tracked = await listChannelsAbovePriority(DEMOTED_PRIORITY);
-  if (tracked.length === 0) return 0;
-  let fixed = 0;
-  const affected = new Set<string>();
-  for (const c of tracked) {
-    if (c.channelId == null) continue;
-    let naciPriority: number | null = null;
-    try {
-      const detail = await getChannel(c.channelId);
-      const p = Number((detail as { priority?: unknown }).priority);
-      naciPriority = Number.isFinite(p) ? p : null;
-    } catch {
-      continue; // naci 读失败（网络/已删）→ 跳过，下轮重试
-    }
-    await new Promise((r) => setTimeout(r, RECONCILE_REQ_DELAY_MS));
-    if (naciPriority == null || naciPriority === c.priority) continue;
-    try {
-      await updateCreatedChannelPriority(c.channelId, naciPriority);
-      fixed += 1;
-      affected.add(c.prefix);
-      await addLog({
-        level: "info",
-        actor: "engine",
-        channelName: c.prefix,
-        channelId: c.channelId,
-        message: `优先级对账：渠道 ${c.channelName} 本地 ${c.priority} → naci 实际 ${naciPriority}（修正本地缓存）`,
-      });
-    } catch {
-      // 更新失败：下轮重试
-    }
-  }
-  for (const p of affected) invalidateChannelCache(p);
-  return fixed;
-}
+// 注：旧的「优先级对账」任务（逐个 getChannel 读 naci 真实优先级找漂移）已移除。
+// 原因：① 建渠道时已回读 naci 实际优先级落库（createChannel 响应的 priority），建时静默降级当场就抓；
+//       ② 我们自己的降级会同步本地；naci 不会自行改 channel_json.priority（只自动禁用站点/key）。
+// 因此逐个 GET 的对账价值已趋近于零，却随 priority6Limit 线性放大 naci 请求；直接删除。
+// 残留漂移（本地6/naci5 的「假6」）交由降级任务的批量 status-batch + 建时回读兜底。
 
 /** 刷新某用户前缀的已建渠道实时缓存（供引擎定时刷新，让管理员列表 key 统计保持新鲜）。 */
 export async function refreshPrefixRealtime(user: User): Promise<void> {
@@ -1048,8 +997,9 @@ const USAGE_QUOTA_CHUNK = 40;
 const USAGE_CHUNK_DELAY_MS = 300;
 
 /**
- * 后台用量刷新任务：挑「刷新次数 < usageMaxUpdates」的已建渠道，分块批量拉 used-quota，
- * 写回 created_channels.used_quota 缓存并计数 +1；某渠道刷够上限即冻结、不再拉，避免雪崩。
+ * 后台用量+状态刷新任务：挑「刷新次数 < usageMaxUpdates」的已建渠道，分块**同时**批量拉 used-quota
+ * 与 status-batch，写回 created_channels.used_quota / status_json 缓存并计数 +1；某渠道刷够上限即冻结、
+ * 不再拉，避免雪崩。实时视图直接读这两份缓存，不再自己打 naci。
  * 刷新后重算受影响前缀的用户用量聚合缓存（users.used_quota = 该前缀各渠道缓存 used_quota 之和）。
  * 返回本轮成功刷新的渠道数。异常自行捕获、不外抛。
  */
@@ -1084,10 +1034,17 @@ export async function refreshChannelUsage(): Promise<number> {
       });
       continue;
     }
+    // 同块顺带拉状态快照（best-effort）：失败不影响用量落库，状态保留旧快照（传 undefined 不覆盖）。
+    let statusMap: Awaited<ReturnType<typeof getChannelsStatusBatch>> = new Map();
+    try {
+      statusMap = await getChannelsStatusBatch(chunk);
+    } catch {
+      statusMap = new Map();
+    }
     for (const id of chunk) {
       const us = usageMap.get(id);
       if (!us) continue; // 读不到该渠道 → 不写、不计数，下轮再试
-      await recordChannelUsage(id, us.usedQuota);
+      await recordChannelUsage(id, us.usedQuota, statusMap.get(id));
       const p = idToPrefix.get(id);
       if (p) affectedPrefixes.add(p);
       updated += 1;
@@ -1157,10 +1114,17 @@ export async function syncPrefixUsage(user: User): Promise<SyncUsageResult> {
   for (let i = 0; i < ids.length; i += USAGE_QUOTA_CHUNK) {
     const chunk = ids.slice(i, i + USAGE_QUOTA_CHUNK);
     const usageMap = await getChannelsUsedQuota(chunk); // 手动触发：失败直接抛给调用方提示
+    // 顺带实时刷状态快照（best-effort，不因状态读失败而中断用量同步）
+    let statusMap: Awaited<ReturnType<typeof getChannelsStatusBatch>> = new Map();
+    try {
+      statusMap = await getChannelsStatusBatch(chunk);
+    } catch {
+      statusMap = new Map();
+    }
     for (const id of chunk) {
       const us = usageMap.get(id);
       if (!us) continue;
-      await setChannelUsage(id, us.usedQuota);
+      await setChannelUsage(id, us.usedQuota, statusMap.get(id));
       channelCount += 1;
     }
     if (i + USAGE_QUOTA_CHUNK < ids.length) {
