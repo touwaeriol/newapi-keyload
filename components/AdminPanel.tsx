@@ -1234,11 +1234,8 @@ function UsersCard() {
       <UploadKeyModal
         open={!!uploadTarget}
         title={uploadTarget ? `代传 Key · ${uploadTarget.username}` : "代传 Key"}
-        endpoint={uploadTarget ? `/api/admin/users/${uploadTarget.id}/upload` : ""}
         directEndpoint={
-          uploadTarget
-            ? `/api/admin/users/${uploadTarget.id}/upload-direct`
-            : undefined
+          uploadTarget ? `/api/admin/users/${uploadTarget.id}/upload-direct` : ""
         }
         onClose={() => setUploadTarget(null)}
         onUploaded={() => load()}

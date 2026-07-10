@@ -7,9 +7,7 @@ import { useToast } from "@/components/Toast";
 import { Button, Card, Spinner } from "@/components/ui";
 import { UserChannelCard } from "@/components/UserChannelCard";
 import {
-  UploadResultView,
   DirectResultView,
-  type UploadQueueResult,
   type DirectUploadResult,
 } from "@/components/UploadKeyModal";
 import {
@@ -279,7 +277,7 @@ function ChannelCard({
             disabled={manualDisabled || onlyHigh}
             title={
               onlyHigh
-                ? "仅高优先级模式：渠道由定时任务在各用户间公平分配，请用「提交上传」录入本地库"
+                ? "仅高优先级模式：渠道由定时任务在各用户间公平分配，请用「直接上传」上传 key"
                 : manualDisabled
                 ? "管理员已关闭手动上传，key 录入本地库后由系统自动上传"
                 : undefined
@@ -325,10 +323,6 @@ function ChannelCard({
 
 /* ============ 上传 Key 卡 ============ */
 
-type UploadCardResult =
-  | { mode: "queue"; data: UploadQueueResult }
-  | { mode: "direct"; data: DirectUploadResult };
-
 function UploadCard({
   onUploaded,
   manualUploadEnabled = true,
@@ -340,41 +334,14 @@ function UploadCard({
 }) {
   const toast = useToast();
   const [text, setText] = useState("");
-  const [loading, setLoading] = useState(false);
   const [directLoading, setDirectLoading] = useState(false);
-  const [result, setResult] = useState<UploadCardResult | null>(null);
+  const [result, setResult] = useState<DirectUploadResult | null>(null);
 
-  const busy = loading || directLoading;
+  const busy = directLoading;
   const lineCount = text
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean).length;
-
-  // 提交上传：只录入本地库，由手动按钮 / 定时引擎分批建渠道
-  async function submit() {
-    const keys = text.trim();
-    if (!keys) {
-      toast.error("请粘贴至少一个 key");
-      return;
-    }
-    setLoading(true);
-    try {
-      const res = await apiFetch<UploadQueueResult>("/api/my/upload", {
-        method: "POST",
-        body: JSON.stringify({ keys }),
-      });
-      setResult({ mode: "queue", data: res });
-      setText("");
-      toast.success(
-        `已录入 ${res.added} 个（待上传 ${res.poolPending}，已上传 ${res.poolUploaded}）`
-      );
-      onUploaded();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "上传失败");
-    } finally {
-      setLoading(false);
-    }
-  }
 
   // 直接上传：录入本地库并立即把 pending 逐批建成新渠道
   async function submitDirect() {
@@ -389,7 +356,7 @@ function UploadCard({
         method: "POST",
         body: JSON.stringify({ keys }),
       });
-      setResult({ mode: "direct", data: res });
+      setResult(res);
       setText("");
       if (res.limited) {
         toast.info(
@@ -421,7 +388,7 @@ function UploadCard({
       <div className="space-y-3">
         {!manualUploadEnabled && (
           <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
-            管理员已关闭手动上传：请使用「提交上传」录入本地库，系统会自动分批推送到站点。
+            管理员已关闭手动上传，暂不能上传 key，请联系管理员开启。
           </p>
         )}
         <textarea
@@ -449,7 +416,8 @@ function UploadCard({
             >
               直接上传（建渠道）
             </Button>
-            <Button onClick={submit} loading={loading} disabled={true}>
+            {/* 占位：提交上传（入队）已下线，保留禁用态按钮提示用户走直接上传 */}
+            <Button disabled={true} title="提交上传已下线，请使用「直接上传」">
               提交上传（已禁用）
             </Button>
           </div>
@@ -457,11 +425,7 @@ function UploadCard({
 
         {result && (
           <div className="rounded-lg border border-slate-200 bg-slate-50/50 p-3">
-            {result.mode === "queue" ? (
-              <UploadResultView result={result.data} />
-            ) : (
-              <DirectResultView result={result.data} />
-            )}
+            <DirectResultView result={result} />
           </div>
         )}
       </div>

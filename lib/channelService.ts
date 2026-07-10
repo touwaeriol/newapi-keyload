@@ -595,10 +595,9 @@ export interface DirectUploadResult {
 /**
  * 直接上传：先把本批 key 落本地池去重，再把池里的 pending **一次性清空**——
  * 按管理员「聚合 key 数量」(uploadBatchSize) 拆分成多个渠道，尾批不足一整批也照建（少量上传）。
- * 与「提交上传」（只落池、等引擎/手动按钮）区别在于立即建完。
- * 优先级：与「上传一批」一致按配额判定——**有空闲高优先级名额就建优先级6渠道**，
- * 全局/用户配额已满或用户被禁高优先级才降到普通(优先级5)。
- * （仅高优先级模式下，直接上传同样受名额门控：无空闲名额时 key 留池、等定时任务公平分配。）
+ * 用户主动触发，因此**不占上传限速窗口额度**(skipRateLimit)、**不受 onlyHighPriority
+ * 门控**(bypassPriorityGate)——不入池排队，立即建完。
+ * 优先级按配额判定：有空闲高优先级名额就建优先级6渠道，配额已满或用户被禁高优先级降到普通(优先级5)。
  */
 export async function directUploadKeys(
   user: User,
@@ -618,8 +617,8 @@ export async function directUploadKeys(
 
   // 直接上传 = 立即传完：不设本轮 key 数上限（安全阀 MAX_CHANNELS_PER_DRAIN 兜底），
   // 每渠道按「聚合 key 数量」拆分，尾批不足一整批也照建；优先级按配额判定
-  //（有空闲高优先级名额即建优先级6，否则普通优先级5）；上传限速仍生效，触发后剩余留池由引擎续传。
-  // 直接上传不占窗口额度、不受 onlyHighPriority 门控——用户主动触发应直接建渠道。
+  //（有空闲高优先级名额即建优先级6，否则普通优先级5）。
+  // 用户主动触发：不占上传限速窗口额度(skipRateLimit)、不受 onlyHighPriority 门控(bypassPriorityGate)。
   const drain = await createChannelsDrain(user, Number.MAX_SAFE_INTEGER, { bypassPriorityGate: true, skipRateLimit: true });
 
   await addLog({

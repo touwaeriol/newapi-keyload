@@ -5,19 +5,6 @@ import { apiFetch } from "@/lib/client";
 import { useToast } from "@/components/Toast";
 import { Button, Modal } from "@/components/ui";
 
-/**
- * 上传入队结果 shape（POST …/upload 返回）。
- * 上传不即时推送到平台，而是先入本地队列，由定时引擎按「每批数量」批量上传。
- */
-export interface UploadQueueResult {
-  /** 本次去重去空后新录入本地库的 key 数 */
-  added: number;
-  /** 本地库中待上传站点的 key 数 */
-  poolPending: number;
-  /** 本地库中已上传站点的 key 数 */
-  poolUploaded: number;
-}
-
 /** 直接上传结果 shape（POST …/upload-direct 返回）：录入并立即把 pending 逐批建成新渠道。 */
 export interface DirectUploadResult {
   /** 本次去重去空后新录入本地库的 key 数 */
@@ -42,44 +29,33 @@ export interface DirectUploadResult {
   waitingMessage?: string;
 }
 
-/** 上传弹窗内联结果：入队 or 直传，用 mode 区分展示。 */
-type ModalResult =
-  | { mode: "queue"; data: UploadQueueResult }
-  | { mode: "direct"; data: DirectUploadResult };
-
 /**
- * 上传 Key 弹窗：粘贴多行 key（每行一个）→ POST 到指定 endpoint（body {keys: 文本}）。
- * - 「提交上传」POST endpoint（入队，定时引擎分批补给）。
- * - 若传入 directEndpoint，则额外渲染「直接上传站点」按钮，POST directEndpoint（跳过队列立即推站点）。
+ * 上传 Key 弹窗：粘贴多行 key（每行一个）→ POST directEndpoint（body {keys: 文本}），
+ * 按「聚合 key 数量」拆分立即建成渠道（有名额建 P6，满则 P5）。
+ * 旧「提交上传」（入队走定时引擎）已下线，仅保留禁用态占位按钮。
  * 成功后内联展示结果，并回调 onUploaded 刷新父级。
  */
 export function UploadKeyModal({
   open,
   title,
-  endpoint,
   directEndpoint,
   onClose,
   onUploaded,
 }: {
   open: boolean;
   title: string;
-  endpoint: string;
-  directEndpoint?: string;
+  directEndpoint: string;
   onClose: () => void;
   onUploaded?: () => void;
 }) {
   const toast = useToast();
   const [text, setText] = useState("");
-  const [loading, setLoading] = useState(false);
   const [directLoading, setDirectLoading] = useState(false);
-  const [result, setResult] = useState<ModalResult | null>(null);
-
-  const busy = loading || directLoading;
+  const [result, setResult] = useState<DirectUploadResult | null>(null);
 
   function reset() {
     setText("");
     setResult(null);
-    setLoading(false);
     setDirectLoading(false);
   }
 
@@ -88,32 +64,7 @@ export function UploadKeyModal({
     onClose();
   }
 
-  // 入队上传：录入本地库，由定时引擎分批补给
-  async function submit() {
-    const keys = text.trim();
-    if (!keys) {
-      toast.error("请粘贴至少一个 key");
-      return;
-    }
-    setLoading(true);
-    try {
-      const res = await apiFetch<UploadQueueResult>(endpoint, {
-        method: "POST",
-        body: JSON.stringify({ keys }),
-      });
-      setResult({ mode: "queue", data: res });
-      toast.success(
-        `已录入 ${res.added} 个（待上传站点 ${res.poolPending}，已上传站点 ${res.poolUploaded}）`
-      );
-      onUploaded?.();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "上传失败");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  // 直接上传：跳过队列，本批立即推站点
+  // 直接上传：本批立即拆分建渠道推站点
   async function submitDirect() {
     if (!directEndpoint) return;
     const keys = text.trim();
@@ -127,7 +78,7 @@ export function UploadKeyModal({
         method: "POST",
         body: JSON.stringify({ keys }),
       });
-      setResult({ mode: "direct", data: res });
+      setResult(res);
       if (res.limited) {
         toast.info(
           `已建 ${res.createdChannels} 个新渠道共传 ${res.pushed} 个后触发上传限速（剩余待上传 ${res.poolPending}，窗口滚动后自动续传）`
@@ -168,20 +119,18 @@ export function UploadKeyModal({
           </Button>
         ) : (
           <>
-            <Button variant="secondary" onClick={close} disabled={busy}>
+            <Button variant="secondary" onClick={close} disabled={directLoading}>
               取消
             </Button>
-            {directEndpoint && (
-              <Button
-                variant="secondary"
-                onClick={submitDirect}
-                loading={directLoading}
-                disabled={busy}
-              >
-                直接上传站点
-              </Button>
-            )}
-            <Button onClick={submit} loading={loading} disabled={true}>
+            <Button
+              variant="secondary"
+              onClick={submitDirect}
+              loading={directLoading}
+            >
+              直接上传站点
+            </Button>
+            {/* 占位：提交上传（入队）已下线，保留禁用态提示用户走直接上传 */}
+            <Button disabled={true} title="提交上传已下线，请使用「直接上传站点」">
               提交上传（已禁用）
             </Button>
           </>
@@ -189,21 +138,13 @@ export function UploadKeyModal({
       }
     >
       {result ? (
-        result.mode === "queue" ? (
-          <UploadResultView result={result.data} />
-        ) : (
-          <DirectResultView result={result.data} />
-        )
+        <DirectResultView result={result} />
       ) : (
         <div className="space-y-2">
           <p className="text-sm text-slate-500">
-            每行粘贴一个 key，系统会自动去重去空并<b>录入本地库</b>。
-            <b>提交上传</b>由定时引擎按「每批数量」分批推送到站点；
-            {directEndpoint && (
-              <>
-                <b>直接上传站点</b>则跳过队列、把本批 key 立即推送到站点。
-              </>
-            )}
+            每行粘贴一个 key，系统会自动去重去空。
+            <b>直接上传站点</b>会按「聚合 key 数量」拆分，立即建成渠道推送到站点
+            （有名额建 P6，满则 P5）。
           </p>
           <textarea
             value={text}
@@ -218,26 +159,6 @@ export function UploadKeyModal({
         </div>
       )}
     </Modal>
-  );
-}
-
-/** 入队结果视图：展示本次新增与队列进度，可复用于用户面板 */
-export function UploadResultView({ result }: { result: UploadQueueResult }) {
-  return (
-    <div className="grid grid-cols-3 gap-3 text-sm">
-      <Stat label="本次录入" value={result.added} />
-      <Stat
-        label="待上传站点"
-        value={
-          result.poolPending > 0 ? (
-            <span className="text-amber-600">{result.poolPending}</span>
-          ) : (
-            result.poolPending
-          )
-        }
-      />
-      <Stat label="已上传站点" value={result.poolUploaded} />
-    </div>
   );
 }
 
@@ -259,22 +180,22 @@ export function DirectResultView({ result }: { result: DirectUploadResult }) {
         </p>
       )}
       <div className="grid grid-cols-3 gap-3 text-sm">
-      <Stat
-        label="新建渠道数"
-        value={<span className="text-emerald-600">{result.createdChannels}</span>}
-      />
-      <Stat label="本次上传 key" value={result.pushed} />
-      <Stat label="新录入本地库" value={result.added} />
-      <Stat
-        label="剩余待上传"
-        value={
-          result.poolPending > 0 ? (
-            <span className="text-amber-600">{result.poolPending}</span>
-          ) : (
-            result.poolPending
-          )
-        }
-      />
+        <Stat
+          label="新建渠道数"
+          value={<span className="text-emerald-600">{result.createdChannels}</span>}
+        />
+        <Stat label="本次上传 key" value={result.pushed} />
+        <Stat label="新录入本地库" value={result.added} />
+        <Stat
+          label="剩余待上传"
+          value={
+            result.poolPending > 0 ? (
+              <span className="text-amber-600">{result.poolPending}</span>
+            ) : (
+              result.poolPending
+            )
+          }
+        />
       </div>
     </div>
   );
