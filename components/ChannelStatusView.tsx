@@ -36,6 +36,8 @@ export interface CreatedChannelView {
     remoteChannelId: number;
     remoteChannelName: string;
   }[];
+  /** 渠道创建时间（ISO） */
+  createdAt?: string;
 }
 
 /**
@@ -147,6 +149,14 @@ function fmtUsd(v?: number) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;
+}
+
+/** 创建时间展示（本地时区，无效/缺失返回 null 不渲染）。 */
+function fmtCreatedAt(at?: string): string | null {
+  if (!at) return null;
+  const d = new Date(at);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleString("zh-CN", { hour12: false });
 }
 
 /** 聚合可用 key 数 = 平台 key 数 − 禁用 key 数；任一缺失返回 null（显示「-」） */
@@ -273,7 +283,12 @@ function ChannelRow({
           <div className="truncate text-sm font-medium text-slate-800">
             {channel.channelName}
           </div>
-          <div className="mt-0.5 text-xs text-slate-400">#{channel.channelId}</div>
+          <div className="mt-0.5 truncate text-xs text-slate-400">
+            #{channel.channelId}
+            {fmtCreatedAt(channel.createdAt) && (
+              <span> · 创建 {fmtCreatedAt(channel.createdAt)}</span>
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-1.5">
           {channel.priority != null && (
@@ -322,8 +337,9 @@ function ChannelRow({
         />
       </div>
 
+      {/* 站点栅格：宽屏 3 站一行（不再一站占一整行），窄屏自动回落 2/1 列 */}
       {channel.sites.length > 0 && (
-        <div className="mt-2 divide-y divide-slate-100 overflow-hidden rounded-lg border border-slate-200">
+        <div className="mt-2 grid gap-1.5 sm:grid-cols-2 lg:grid-cols-3">
           {channel.sites.map((s) => (
             <SiteRow
               key={s.site_id}
@@ -369,8 +385,8 @@ function SiteRow({
   }
 
   return (
-    <div className="flex items-center justify-between gap-3 px-3 py-2">
-      <div className="truncate text-xs text-slate-600">
+    <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 px-2.5 py-1.5">
+      <div className="min-w-0 truncate text-xs text-slate-600">
         {site.site_name}
         <span className="ml-1 text-slate-400">#{site.site_id}</span>
         {remoteChannelId != null && remoteChannelId > 0 && (
@@ -382,7 +398,7 @@ function SiteRow({
           </span>
         )}
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex shrink-0 items-center gap-1.5">
         {siteBadge(site.status)}
         {busy && <Spinner className="h-4 w-4 text-slate-400" />}
         {onSiteToggle && (

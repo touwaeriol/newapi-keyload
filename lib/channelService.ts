@@ -668,6 +668,8 @@ export interface CreatedChannelView {
   sites: SiteSchedule[];
   /** 建渠道时 naci 返回的各站远程渠道 id（本地落库，publish_results）。 */
   remoteSites: { siteId: number; remoteChannelId: number; remoteChannelName: string }[];
+  /** 渠道创建时间（ISO，本地 created_channels.created_at） */
+  createdAt: string;
 }
 
 interface PrefixRealtime {
@@ -763,6 +765,7 @@ async function fetchPrefixRealtime(user: User): Promise<PrefixRealtime> {
       usedAmount,
       sites: sitesWithNames(st?.sites ?? []),
       remoteSites: siteMap.get(c.id) ?? [],
+      createdAt: c.createdAt,
     };
   });
 
