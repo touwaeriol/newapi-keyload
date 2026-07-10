@@ -343,7 +343,7 @@ async function createTables(pool: Pool): Promise<void> {
   await pool.query(
     `ALTER TABLE created_channels ADD COLUMN IF NOT EXISTS status_json jsonb`
   );
-  // 日期标签（MM-DD）：渠道名 = 前缀-日期标签-序号，每个日期从 1 起计，不限位数。
+  // 日期标签（MM-DD）：渠道名 = 日期标签-前缀-序号（如 07-10-LIU-B-1），每个日期从 1 起计，不限位数。
   // 兼容旧库：存量行填 "00-00"。旧 UNIQUE(prefix,suffix) 改为 (prefix,date_tag,suffix)。
   await pool.query(
     `ALTER TABLE created_channels ADD COLUMN IF NOT EXISTS date_tag text NOT NULL DEFAULT '00-00'`

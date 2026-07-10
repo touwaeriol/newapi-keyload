@@ -149,9 +149,9 @@ export function todayTag(): string {
   return `${mm}-${dd}`;
 }
 
-/** 由前缀 + 日期标签 + 序号拼渠道名：`${prefix}-07-10-1`。每个日期从 1 开始累加，不限位数。 */
+/** 由日期标签 + 前缀 + 序号拼渠道名：`07-10-前缀-1`。每个日期从 1 开始累加，不限位数。 */
 export function buildChannelName(prefix: string, dateTag: string, suffix: number): string {
-  return `${prefix.trim()}-${dateTag}-${formatSuffix(suffix)}`;
+  return `${dateTag}-${prefix.trim()}-${formatSuffix(suffix)}`;
 }
 
 /** 把多行/含空白的 key 文本解析为去重、去空的有序数组 */
