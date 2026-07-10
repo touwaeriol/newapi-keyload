@@ -6,7 +6,13 @@ import { useState, useEffect, useCallback } from "react";
 import { apiFetch, getStoredKey } from "@/lib/client";
 import { useToast } from "@/components/Toast";
 import { Button, Card, Spinner } from "@/components/ui";
-import { ChannelTable, Pager, type ChannelItem } from "@/components/ChannelTable";
+import {
+  ChannelTable,
+  downloadButtonLabel,
+  Pager,
+  useElapsedSeconds,
+  type ChannelItem,
+} from "@/components/ChannelTable";
 import type { SafeUser } from "@/lib/types";
 
 const PAGE_SIZE = 100;
@@ -72,6 +78,7 @@ export function UserChannelCard({ user }: { user: SafeUser }) {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+      t.success("报表已生成并开始下载");
     } catch (err) {
       t.error(`下载失败：${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -85,6 +92,7 @@ export function UserChannelCard({ user }: { user: SafeUser }) {
   }, [search]);
 
   const totalPages = result ? Math.ceil(result.total / result.pageSize) : 0;
+  const downloadSec = useElapsedSeconds(downloading);
 
   if (!prefix) {
     return (
@@ -101,8 +109,13 @@ export function UserChannelCard({ user }: { user: SafeUser }) {
       title="📊 渠道列表"
       subtitle={`前缀 "${prefix}" — naci 实时用量与站点/key状态`}
       actions={
-        <Button variant="secondary" onClick={download} loading={downloading}>
-          📥 下载报表
+        <Button
+          variant="secondary"
+          onClick={download}
+          loading={downloading}
+          title="生成 CSV 报表：服务端逐块拉取全部渠道的实时用量与 key 状态，渠道多时需要几十秒"
+        >
+          {downloadButtonLabel(downloading, downloadSec, result?.total ?? 0)}
         </Button>
       }
     >

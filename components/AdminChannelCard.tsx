@@ -5,7 +5,13 @@ import { useState, useCallback, useMemo } from "react";
 import { apiFetch, getStoredKey } from "@/lib/client";
 import { useToast } from "@/components/Toast";
 import { Button, Card, Spinner, TextInput } from "@/components/ui";
-import { ChannelTable, Pager, type ChannelItem } from "@/components/ChannelTable";
+import {
+  ChannelTable,
+  downloadButtonLabel,
+  Pager,
+  useElapsedSeconds,
+  type ChannelItem,
+} from "@/components/ChannelTable";
 
 const CLIENT_PAGE_SIZE = 100;
 
@@ -52,8 +58,14 @@ export function AdminChannelCard() {
         { headers: key ? { "x-access-key": key } : {} }
       );
       if (!res.ok) {
-        const msg =
-          res.status === 401 ? "缺少访问密钥，请重新登录" : `下载失败 (HTTP ${res.status})`;
+        // 非 200 时后端返回 JSON {message}，解析后提示（401/429/500 等）
+        let msg = `下载失败 (HTTP ${res.status})`;
+        try {
+          const j = (await res.json()) as { message?: string };
+          if (j?.message) msg = j.message;
+        } catch {
+          /* 非 JSON 响应用兜底文案 */
+        }
         t.error(msg);
         return;
       }
@@ -66,6 +78,7 @@ export function AdminChannelCard() {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+      t.success("报表已生成并开始下载");
     } catch (err) {
       t.error(`下载失败：${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -74,6 +87,7 @@ export function AdminChannelCard() {
   }, [keyword, t]);
 
   const totalPages = Math.ceil(total / CLIENT_PAGE_SIZE);
+  const downloadSec = useElapsedSeconds(downloading);
   const pageItems = useMemo(
     () => allItems.slice((page - 1) * CLIENT_PAGE_SIZE, page * CLIENT_PAGE_SIZE),
     [allItems, page]
@@ -98,8 +112,13 @@ export function AdminChannelCard() {
             🔍 搜索
           </Button>
           {total > 0 && (
-            <Button variant="secondary" onClick={download} loading={downloading}>
-              📥 下载报表
+            <Button
+              variant="secondary"
+              onClick={download}
+              loading={downloading}
+              title="生成 CSV 报表：服务端逐块拉取全部命中渠道的实时用量与 key 状态，渠道多时需要几十秒"
+            >
+              {downloadButtonLabel(downloading, downloadSec, total)}
             </Button>
           )}
         </div>

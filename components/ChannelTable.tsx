@@ -2,6 +2,7 @@
 
 // 渠道搜索结果表格（管理员「渠道管理」与用户「渠道列表」共用）：
 // naci ID / 渠道名 / 优先级 / 站点状态 / key 存活 / 金额 / 创建时间，附翻页条。
+import { useEffect, useState } from "react";
 import { Badge, Button } from "@/components/ui";
 
 /** naci 额度换算美元的除数（与 lib/naci.ts QUOTA_PER_USD 一致；lib 为服务端模块，前端不直接 import）。 */
@@ -41,6 +42,39 @@ export function fmtTime(ts: string) {
   const d = new Date(ts.length === 19 ? ts + "Z" : ts);
   if (Number.isNaN(d.getTime())) return ts;
   return d.toLocaleString("zh-CN", { hour12: false });
+}
+
+/** active 期间每 0.5s 更新一次的已耗时秒数（active 变 false 归零）。 */
+export function useElapsedSeconds(active: boolean): number {
+  const [sec, setSec] = useState(0);
+  useEffect(() => {
+    if (!active) {
+      setSec(0);
+      return;
+    }
+    const started = Date.now();
+    const t = setInterval(
+      () => setSec(Math.round((Date.now() - started) / 1000)),
+      500
+    );
+    return () => clearInterval(t);
+  }, [active]);
+  return sec;
+}
+
+/**
+ * 报表下载按钮文案：生成中显示「已耗时 / 预估」。
+ * 预估按服务端节奏算：每 40 个渠道一块、块间 300ms，加 naci 往返按每块 ~1.2s 估。
+ */
+export function downloadButtonLabel(
+  downloading: boolean,
+  elapsedSec: number,
+  totalChannels: number
+): string {
+  if (!downloading) return "📥 下载报表";
+  if (totalChannels <= 0) return `生成中 ${elapsedSec}s…`;
+  const est = Math.max(3, Math.ceil(Math.ceil(totalChannels / 40) * 1.2));
+  return `生成中 ${elapsedSec}s / 约${est}s`;
 }
 
 function SiteDot({ site }: { site: SiteStatus }) {
