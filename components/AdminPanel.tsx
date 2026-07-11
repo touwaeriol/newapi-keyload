@@ -114,6 +114,8 @@ interface ConfigResponse {
   userManualUploadEnabled: boolean;
   /** 仅使用高优先级渠道：只在有空闲优先级6名额时建渠道，不降级到5 */
   onlyHighPriorityEnabled: boolean;
+  /** 全局禁止上传总闸：true=所有上传/提交端点拒绝 */
+  uploadDisabled: boolean;
   /** 用户渠道查询限流：每 N 秒最多一次（0=不限） */
   userQueryIntervalSeconds: number;
   /** 用户报表拉取限流：每 N 分钟最多一次（0=不限） */
@@ -182,6 +184,8 @@ function ConfigCard() {
   const [manualUploadEnabled, setManualUploadEnabled] = useState(true);
   // 仅使用高优先级渠道
   const [onlyHighPriority, setOnlyHighPriority] = useState(false);
+  // 全局禁止上传总闸
+  const [uploadDisabled, setUploadDisabled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [pinging, setPinging] = useState(false);
@@ -295,6 +299,7 @@ function ConfigCard() {
           : true
       );
       setOnlyHighPriority(Boolean(data.onlyHighPriorityEnabled));
+      setUploadDisabled(Boolean(data.uploadDisabled));
       setPassword("");
     } catch (err) {
       if (!mounted.current) return;
@@ -405,6 +410,7 @@ function ConfigCard() {
           userUploadLimitWindowMinutes: safeUWindow,
           userManualUploadEnabled: manualUploadEnabled,
           onlyHighPriorityEnabled: onlyHighPriority,
+          uploadDisabled,
           userQueryIntervalSeconds: safeQryInterval,
           userReportIntervalMinutes: safeRptInterval,
         }),
@@ -621,6 +627,14 @@ function ConfigCard() {
               value={gLimitWindow}
               onChange={setGLimitWindow}
               placeholder={String(DEFAULT_UPLOAD_LIMIT_WINDOW)}
+            />
+            <CheckField
+              label="🚫 全局禁止上传（总闸）"
+              hint="开启后所有人（含管理员代传）的「上传一批 / 直接上传」全部拒绝，前端按钮禁用；不影响引擎继续消化本地池已有 key。用于紧急停摆 / naci 维护"
+              checked={uploadDisabled}
+              onChange={setUploadDisabled}
+              onText="已全局禁止上传"
+              offText="上传正常"
             />
             <CheckField
               label="禁止用户手动上传"

@@ -1,5 +1,11 @@
 import { NextRequest } from "next/server";
-import { errorResponse, fail, ok, requireAdmin } from "@/lib/auth";
+import {
+  errorResponse,
+  fail,
+  ok,
+  requireAdmin,
+  uploadGloballyDisabled,
+} from "@/lib/auth";
 import { findUserById } from "@/lib/store";
 import { parseKeys } from "@/lib/supplier";
 import { directUploadKeys } from "@/lib/channelService";
@@ -15,6 +21,8 @@ export async function POST(
 ) {
   try {
     await requireAdmin(req);
+    const blocked = await uploadGloballyDisabled();
+    if (blocked) return blocked;
     const target = await findUserById(params.id);
     if (!target) return fail("用户不存在", 404);
 

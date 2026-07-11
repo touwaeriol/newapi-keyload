@@ -1,5 +1,11 @@
 import { NextRequest } from "next/server";
-import { errorResponse, fail, ok, requireUser } from "@/lib/auth";
+import {
+  errorResponse,
+  fail,
+  ok,
+  requireUser,
+  uploadGloballyDisabled,
+} from "@/lib/auth";
 import { parseKeys } from "@/lib/supplier";
 import { directUploadKeys } from "@/lib/channelService";
 import { getConfig } from "@/lib/store";
@@ -12,6 +18,8 @@ export const dynamic = "force-dynamic";
 export async function POST(req: NextRequest) {
   try {
     const user = await requireUser(req);
+    const blocked = await uploadGloballyDisabled();
+    if (blocked) return blocked;
     const body = (await req.json().catch(() => ({}))) as {
       keys?: string | string[];
     };

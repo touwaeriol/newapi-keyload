@@ -196,6 +196,7 @@ export function UserPanel({ user }: { user: SafeUser }) {
           <UploadCard
             onUploaded={() => fetchChannel(false)}
             manualUploadEnabled={channel?.manualUploadEnabled !== false}
+            uploadDisabled={channel?.uploadDisabled === true}
             onlyHighPriority={channel?.onlyHighPriority === true}
           />
         </div>
@@ -232,6 +233,7 @@ function ChannelCard({
   const toast = useToast();
   const [creating, setCreating] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const uploadDisabled = channel?.uploadDisabled === true;
   const manualDisabled = channel?.manualUploadEnabled === false;
   const onlyHigh = channel?.onlyHighPriority === true;
 
@@ -274,9 +276,11 @@ function ChannelCard({
           <Button
             onClick={createBatch}
             loading={creating}
-            disabled={manualDisabled || onlyHigh}
+            disabled={uploadDisabled || manualDisabled || onlyHigh}
             title={
-              onlyHigh
+              uploadDisabled
+                ? "管理员已全局禁止上传，暂时无法提交"
+                : onlyHigh
                 ? "仅高优先级模式：渠道由定时任务在各用户间公平分配，请用「直接上传」上传 key"
                 : manualDisabled
                 ? "管理员已关闭手动上传，key 录入本地库后由系统自动上传"
@@ -326,10 +330,12 @@ function ChannelCard({
 function UploadCard({
   onUploaded,
   manualUploadEnabled = true,
+  uploadDisabled = false,
   onlyHighPriority = false,
 }: {
   onUploaded: () => void;
   manualUploadEnabled?: boolean;
+  uploadDisabled?: boolean;
   onlyHighPriority?: boolean;
 }) {
   const toast = useToast();
@@ -394,10 +400,16 @@ function UploadCard({
       subtitle="每行一个 key。直接上传＝按「聚合 key 数量」拆分立即建成渠道（有名额建 P6，满则 P5），不排队。"
     >
       <div className="space-y-3">
-        {!manualUploadEnabled && (
-          <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
-            管理员已关闭手动上传，暂不能上传 key，请联系管理员开启。
+        {uploadDisabled ? (
+          <p className="rounded-lg bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
+            🚫 管理员已全局禁止上传，暂时无法提交 key，请稍后再试或联系管理员。
           </p>
+        ) : (
+          !manualUploadEnabled && (
+            <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+              管理员已关闭手动上传，暂不能上传 key，请联系管理员开启。
+            </p>
+          )
         )}
         <textarea
           value={text}
@@ -415,9 +427,11 @@ function UploadCard({
               variant="secondary"
               onClick={submitDirect}
               loading={directLoading}
-              disabled={busy || !manualUploadEnabled}
+              disabled={busy || !manualUploadEnabled || uploadDisabled}
               title={
-                !manualUploadEnabled
+                uploadDisabled
+                  ? "管理员已全局禁止上传"
+                  : !manualUploadEnabled
                   ? "管理员已关闭手动上传"
                   : "立即按「聚合 key 数量」拆分建渠道传完；有名额建P6，满则P5"
               }

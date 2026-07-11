@@ -83,6 +83,11 @@ export interface SystemConfig {
   userUploadLimitWindowMinutes: number;
   /** 是否允许普通用户手动上传（「上传一批」「直接上传」）。false=只能录入本地库，由引擎自动推站点 */
   userManualUploadEnabled: boolean;
+  /**
+   * 全局禁止上传总闸：开启后**所有**上传/提交入口（用户端 + 管理端代传，含直接上传与新建渠道）
+   * 一律拒绝，前端按钮禁用。用于紧急停摆 / naci 维护；不影响引擎继续消化本地池已有的 key。
+   */
+  uploadDisabled: boolean;
   /** 用户渠道查询限流：每 N 秒最多查询一次（0=不限，1~3600；Redis 滑动窗口桶） */
   userQueryIntervalSeconds: number;
   /** 用户报表拉取限流：每 N 分钟最多下载一次（0=不限，1~1440；Redis 滑动窗口桶） */

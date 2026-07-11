@@ -1154,6 +1154,8 @@ export async function resolveMyChannel(user: User) {
   // 是否允许手动上传（全局开关；管理员不受限，普通用户看全局配置）
   const manualUploadEnabled =
     user.role === "admin" ? true : cfg.userManualUploadEnabled;
+  // 全局禁止上传总闸：对所有人生效（含管理员），前端据此禁用所有上传按钮
+  const uploadDisabled = cfg.uploadDisabled === true;
   // 高优先级(优先级6)配额：全局已用/上限（跨所有用户）+ 本用户已用/独立上限
   const hpGlobalUsed = await countChannelsAtPriority(FIXED_PRIORITY);
   const hpGlobalLimit = cfg.priority6Limit;
@@ -1172,6 +1174,7 @@ export async function resolveMyChannel(user: User) {
       autoRefillEnabled,
       uploadLimit,
       manualUploadEnabled,
+      uploadDisabled,
       onlyHighPriority: cfg.onlyHighPriorityEnabled,
       highPriority: {
         allowed: user.allowHighPriority !== false,
@@ -1211,6 +1214,7 @@ export async function resolveMyChannel(user: User) {
     autoRefillEnabled,
     uploadLimit,
     manualUploadEnabled,
+    uploadDisabled,
     onlyHighPriority: cfg.onlyHighPriorityEnabled,
     highPriority: {
       allowed: user.allowHighPriority !== false,

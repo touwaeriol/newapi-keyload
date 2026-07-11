@@ -30,6 +30,7 @@ const SEED_USER_MANUAL_UPLOAD_ENABLED = true; // 默认允许用户手动上传
 const SEED_USER_QUERY_INTERVAL_SECONDS = 3; // 用户渠道查询限流：每 3 秒一次
 const SEED_USER_REPORT_INTERVAL_MINUTES = 3; // 用户报表拉取限流：每 3 分钟一次
 const SEED_ONLY_HIGH_PRIORITY_ENABLED = false; // 默认关闭「仅使用高优先级渠道」模式
+const SEED_UPLOAD_DISABLED = false; // 默认不禁止上传
 
 /** 聚合 key 数量合法区间钳制（1~1000，每渠道聚合多少 key） */
 export function clampBatchSize(n: unknown): number {
@@ -273,6 +274,10 @@ async function createTables(pool: Pool): Promise<void> {
   // 全局开关：仅使用高优先级渠道（只在有空闲优先级6名额时建渠道，不降级到5）。
   await pool.query(
     `ALTER TABLE config ADD COLUMN IF NOT EXISTS only_high_priority_enabled boolean NOT NULL DEFAULT false`
+  );
+  // 全局禁止上传总闸：开启后所有上传/提交端点拒绝（默认 false=不禁止）。
+  await pool.query(
+    `ALTER TABLE config ADD COLUMN IF NOT EXISTS upload_disabled boolean NOT NULL DEFAULT false`
   );
   // 用户渠道管理接口限流：查询每 N 秒一次（默认 3s），报表每 N 分钟一次（默认 3min）；0=不限。
   await pool.query(
@@ -653,10 +658,11 @@ export async function getConfig(): Promise<SystemConfig> {
     user_upload_limit_window_minutes: number;
     user_manual_upload_enabled: boolean;
     only_high_priority_enabled: boolean;
+    upload_disabled: boolean;
     user_query_interval_seconds: number;
     user_report_interval_minutes: number;
   }>(
-    "SELECT naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, demote_grace_minutes, demote_interval_seconds, demote_grace_seconds, usage_refresh_interval_minutes, usage_max_updates, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes, user_manual_upload_enabled, only_high_priority_enabled, user_query_interval_seconds, user_report_interval_minutes FROM config WHERE id = 1"
+    "SELECT naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, demote_grace_minutes, demote_interval_seconds, demote_grace_seconds, usage_refresh_interval_minutes, usage_max_updates, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes, user_manual_upload_enabled, only_high_priority_enabled, upload_disabled, user_query_interval_seconds, user_report_interval_minutes FROM config WHERE id = 1"
   );
   if (!rows[0]) {
     return {
@@ -680,6 +686,7 @@ export async function getConfig(): Promise<SystemConfig> {
       userUploadLimitWindowMinutes: SEED_UPLOAD_LIMIT_WINDOW_MINUTES,
       userManualUploadEnabled: SEED_USER_MANUAL_UPLOAD_ENABLED,
       onlyHighPriorityEnabled: SEED_ONLY_HIGH_PRIORITY_ENABLED,
+      uploadDisabled: SEED_UPLOAD_DISABLED,
       userQueryIntervalSeconds: SEED_USER_QUERY_INTERVAL_SECONDS,
       userReportIntervalMinutes: SEED_USER_REPORT_INTERVAL_MINUTES,
     };
@@ -715,6 +722,7 @@ export async function getConfig(): Promise<SystemConfig> {
     ),
     userManualUploadEnabled: Boolean(rows[0].user_manual_upload_enabled),
     onlyHighPriorityEnabled: Boolean(rows[0].only_high_priority_enabled),
+    uploadDisabled: Boolean(rows[0].upload_disabled),
     userQueryIntervalSeconds: clampUserQueryIntervalSeconds(
       rows[0].user_query_interval_seconds
     ),
@@ -728,8 +736,8 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
   const pool = await ensureReady();
   const models = (cfg.models ?? "").trim() || SEED_MODELS;
   await pool.query(
-    `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, demote_interval_seconds, demote_grace_seconds, usage_refresh_interval_minutes, usage_max_updates, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes, user_manual_upload_enabled, only_high_priority_enabled, user_query_interval_seconds, user_report_interval_minutes)
-     VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+    `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, demote_interval_seconds, demote_grace_seconds, usage_refresh_interval_minutes, usage_max_updates, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes, user_manual_upload_enabled, only_high_priority_enabled, upload_disabled, user_query_interval_seconds, user_report_interval_minutes)
+     VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
      ON CONFLICT (id) DO UPDATE SET
        naci_base_url = EXCLUDED.naci_base_url,
        naci_token = EXCLUDED.naci_token,
@@ -751,6 +759,7 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
        user_upload_limit_window_minutes = EXCLUDED.user_upload_limit_window_minutes,
        user_manual_upload_enabled = EXCLUDED.user_manual_upload_enabled,
        only_high_priority_enabled = EXCLUDED.only_high_priority_enabled,
+       upload_disabled = EXCLUDED.upload_disabled,
        user_query_interval_seconds = EXCLUDED.user_query_interval_seconds,
        user_report_interval_minutes = EXCLUDED.user_report_interval_minutes`,
     [
@@ -774,6 +783,7 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
       clampUploadLimitWindowMinutes(cfg.userUploadLimitWindowMinutes),
       cfg.userManualUploadEnabled ?? SEED_USER_MANUAL_UPLOAD_ENABLED,
       cfg.onlyHighPriorityEnabled ?? SEED_ONLY_HIGH_PRIORITY_ENABLED,
+      cfg.uploadDisabled ?? SEED_UPLOAD_DISABLED,
       clampUserQueryIntervalSeconds(cfg.userQueryIntervalSeconds),
       clampUserReportIntervalMinutes(cfg.userReportIntervalMinutes),
     ]

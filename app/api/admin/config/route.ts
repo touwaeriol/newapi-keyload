@@ -32,6 +32,7 @@ export async function GET(req: NextRequest) {
       userUploadLimitWindowMinutes: cfg.userUploadLimitWindowMinutes,
       userManualUploadEnabled: cfg.userManualUploadEnabled,
       onlyHighPriorityEnabled: cfg.onlyHighPriorityEnabled,
+      uploadDisabled: cfg.uploadDisabled,
       userQueryIntervalSeconds: cfg.userQueryIntervalSeconds,
       userReportIntervalMinutes: cfg.userReportIntervalMinutes,
     });
@@ -66,6 +67,7 @@ export async function PUT(req: NextRequest) {
       userUploadLimitWindowMinutes?: number;
       userManualUploadEnabled?: boolean;
       onlyHighPriorityEnabled?: boolean;
+      uploadDisabled?: boolean;
       userQueryIntervalSeconds?: number;
       userReportIntervalMinutes?: number;
     };
@@ -155,6 +157,10 @@ export async function PUT(req: NextRequest) {
       typeof body.onlyHighPriorityEnabled === "boolean"
         ? body.onlyHighPriorityEnabled
         : current.onlyHighPriorityEnabled;
+    const uploadDisabled =
+      typeof body.uploadDisabled === "boolean"
+        ? body.uploadDisabled
+        : current.uploadDisabled;
     // 用户查询/报表限流：未传则保留原值；由 store.saveConfig 内部钳制（0=不限）
     const userQueryIntervalSeconds =
       body.userQueryIntervalSeconds == null
@@ -186,6 +192,7 @@ export async function PUT(req: NextRequest) {
       userUploadLimitWindowMinutes,
       userManualUploadEnabled,
       onlyHighPriorityEnabled,
+      uploadDisabled,
       userQueryIntervalSeconds,
       userReportIntervalMinutes,
     });
@@ -212,6 +219,7 @@ export async function PUT(req: NextRequest) {
       userUploadLimitWindowMinutes: saved.userUploadLimitWindowMinutes,
       userManualUploadEnabled: saved.userManualUploadEnabled,
       onlyHighPriorityEnabled: saved.onlyHighPriorityEnabled,
+      uploadDisabled: saved.uploadDisabled,
       userQueryIntervalSeconds: saved.userQueryIntervalSeconds,
       userReportIntervalMinutes: saved.userReportIntervalMinutes,
     });

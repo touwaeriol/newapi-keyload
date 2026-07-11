@@ -1,7 +1,7 @@
 // 请求鉴权：从请求头取访问密钥，匹配用户身份与角色。
 import { NextRequest, NextResponse } from "next/server";
 import type { Role, User } from "./types";
-import { findUserByKey } from "./store";
+import { findUserByKey, getConfig } from "./store";
 
 export const ACCESS_KEY_HEADER = "x-access-key";
 
@@ -61,6 +61,18 @@ export function errorResponse(err: unknown): NextResponse {
   const message =
     err instanceof Error && err.message ? err.message : "服务器内部错误";
   return NextResponse.json({ success: false, message }, { status: 500 });
+}
+
+/**
+ * 全局禁止上传总闸：开启后所有上传/提交端点直接拒绝（用户端与管理端代传均拦，含直接上传/新建渠道）。
+ * 命中返回 403 拦截响应；未开启返回 null（放行）。不影响引擎继续消化本地池已有 key。
+ */
+export async function uploadGloballyDisabled(): Promise<NextResponse | null> {
+  const cfg = await getConfig();
+  if (cfg.uploadDisabled) {
+    return fail("管理员已全局禁止上传，暂时无法提交 key", 403);
+  }
+  return null;
 }
 
 export function ok(data: unknown = {}) {

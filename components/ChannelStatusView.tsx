@@ -81,6 +81,8 @@ export interface ChannelStatus {
   } | null;
   /** 是否允许手动上传（全局开关；false=只能录入，靠引擎自动推站点） */
   manualUploadEnabled?: boolean;
+  /** 全局禁止上传总闸：true=所有上传按钮禁用、提交一律拒绝 */
+  uploadDisabled?: boolean;
   /** 是否「仅使用高优先级渠道」模式（名额满时 key 留池等回收） */
   onlyHighPriority?: boolean;
   /** 高优先级配额状态 */
