@@ -119,7 +119,11 @@ type StatusEntry = {
 
 export async function enrichChannelRows(
   items: ChannelSearchItem[],
-  opts: { withStatus?: boolean } = {}
+  opts: {
+    withStatus?: boolean;
+    /** 每处理完一块回调一次（done=已补完的渠道数, total=总数），供报表进度上报 */
+    onProgress?: (done: number, total: number) => void;
+  } = {}
 ): Promise<ChannelSearchRow[]> {
   const withStatus = opts.withStatus !== false;
   const ids = items.map((i) => i.id);
@@ -140,6 +144,7 @@ export async function enrichChannelRows(
     if (sRes.status === "fulfilled") {
       for (const [id, st] of sRes.value) statusMap.set(id, st);
     }
+    opts.onProgress?.(Math.min(i + ENRICH_CHUNK, ids.length), ids.length);
     if (i + ENRICH_CHUNK < ids.length) {
       await new Promise((r) => setTimeout(r, ENRICH_DELAY_MS));
     }

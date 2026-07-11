@@ -8,8 +8,10 @@ import { Button, Card, Spinner, TextInput } from "@/components/ui";
 import {
   ChannelTable,
   downloadButtonLabel,
+  newReportJobId,
   Pager,
   useElapsedSeconds,
+  useReportProgress,
   type ChannelItem,
 } from "@/components/ChannelTable";
 
@@ -25,6 +27,7 @@ export function AdminChannelCard() {
   const [keyword, setKeyword] = useState("");
   const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [downloadJob, setDownloadJob] = useState<string | null>(null);
   const [allItems, setAllItems] = useState<ChannelItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -50,11 +53,13 @@ export function AdminChannelCard() {
   const download = useCallback(async () => {
     const kw = keyword.trim();
     if (!kw) return;
+    const job = newReportJobId();
+    setDownloadJob(job);
     setDownloading(true);
     try {
       const key = getStoredKey();
       const res = await fetch(
-        `/api/admin/channels/download?keyword=${encodeURIComponent(kw)}`,
+        `/api/admin/channels/download?keyword=${encodeURIComponent(kw)}&job=${job}`,
         { headers: key ? { "x-access-key": key } : {} }
       );
       if (!res.ok) {
@@ -83,11 +88,13 @@ export function AdminChannelCard() {
       t.error(`下载失败：${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setDownloading(false);
+      setDownloadJob(null);
     }
   }, [keyword, t]);
 
   const totalPages = Math.ceil(total / CLIENT_PAGE_SIZE);
   const downloadSec = useElapsedSeconds(downloading);
+  const downloadProgress = useReportProgress(downloadJob);
   const pageItems = useMemo(
     () => allItems.slice((page - 1) * CLIENT_PAGE_SIZE, page * CLIENT_PAGE_SIZE),
     [allItems, page]
@@ -118,7 +125,7 @@ export function AdminChannelCard() {
               loading={downloading}
               title="生成 CSV 报表：服务端逐块拉取全部命中渠道的实时用量与 key 状态，渠道多时需要几十秒"
             >
-              {downloadButtonLabel(downloading, downloadSec, total)}
+              {downloadButtonLabel(downloading, downloadSec, downloadProgress)}
             </Button>
           )}
         </div>

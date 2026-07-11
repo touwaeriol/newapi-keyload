@@ -9,8 +9,10 @@ import { Button, Card, Spinner } from "@/components/ui";
 import {
   ChannelTable,
   downloadButtonLabel,
+  newReportJobId,
   Pager,
   useElapsedSeconds,
+  useReportProgress,
   type ChannelItem,
 } from "@/components/ChannelTable";
 import type { SafeUser } from "@/lib/types";
@@ -29,6 +31,7 @@ export function UserChannelCard({ user }: { user: SafeUser }) {
   const prefix = user.channelName.trim();
   const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [downloadJob, setDownloadJob] = useState<string | null>(null);
   const [result, setResult] = useState<SearchResult | null>(null);
 
   const search = useCallback(
@@ -51,10 +54,12 @@ export function UserChannelCard({ user }: { user: SafeUser }) {
 
   const download = useCallback(async () => {
     if (!prefix) return;
+    const job = newReportJobId();
+    setDownloadJob(job);
     setDownloading(true);
     try {
       const key = getStoredKey();
-      const res = await fetch("/api/my/channels/download", {
+      const res = await fetch(`/api/my/channels/download?job=${job}`, {
         headers: key ? { "x-access-key": key } : {},
       });
       if (!res.ok) {
@@ -83,6 +88,7 @@ export function UserChannelCard({ user }: { user: SafeUser }) {
       t.error(`下载失败：${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setDownloading(false);
+      setDownloadJob(null);
     }
   }, [prefix, t]);
 
@@ -93,6 +99,7 @@ export function UserChannelCard({ user }: { user: SafeUser }) {
 
   const totalPages = result ? Math.ceil(result.total / result.pageSize) : 0;
   const downloadSec = useElapsedSeconds(downloading);
+  const downloadProgress = useReportProgress(downloadJob);
 
   if (!prefix) {
     return (
@@ -115,7 +122,7 @@ export function UserChannelCard({ user }: { user: SafeUser }) {
           loading={downloading}
           title="生成 CSV 报表：服务端逐块拉取全部渠道的实时用量与 key 状态，渠道多时需要几十秒"
         >
-          {downloadButtonLabel(downloading, downloadSec, result?.total ?? 0)}
+          {downloadButtonLabel(downloading, downloadSec, downloadProgress)}
         </Button>
       }
     >

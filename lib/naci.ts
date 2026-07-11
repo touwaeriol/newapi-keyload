@@ -330,7 +330,8 @@ const SEARCH_PAGE_DELAY_MS = 200;
  */
 export async function searchChannelsAll(
   keyword: string,
-  maxItems: number
+  maxItems: number,
+  onProgress?: (fetched: number, total: number) => void
 ): Promise<{ items: ChannelSearchItem[]; total: number }> {
   const items: ChannelSearchItem[] = [];
   let page = 1;
@@ -344,6 +345,7 @@ export async function searchChannelsAll(
       );
     }
     items.push(...res.items);
+    onProgress?.(items.length, total);
     if (items.length >= total || res.items.length === 0) break;
     page += 1;
     await sleep(SEARCH_PAGE_DELAY_MS);

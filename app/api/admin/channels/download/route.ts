@@ -7,20 +7,39 @@ import {
   enrichChannelRows,
   MAX_ADMIN_SEARCH_RESULTS,
 } from "@/lib/channelSearch";
+import { updateReportProgress } from "@/lib/reportProgress";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// GET /api/admin/channels/download?keyword=xxx —— 关键词命中渠道的 CSV 报表
+// GET /api/admin/channels/download?keyword=xxx&job=<前端生成的进度id> —— 关键词命中渠道的 CSV 报表。
+// 带 job 时把「拉列表/补用量」进度写进内存表，前端下载期间轮询 /api/report-progress 展示。
 export async function GET(req: NextRequest) {
   try {
-    await requireAdmin(req);
+    const admin = await requireAdmin(req);
     const keyword = (req.nextUrl.searchParams.get("keyword") || "").trim();
     if (!keyword) return fail("keyword 参数必填", 400);
+    const job = (req.nextUrl.searchParams.get("job") || "").trim().slice(0, 64);
+    const track = (
+      phase: "search" | "enrich" | "done",
+      done: number,
+      total: number
+    ) => {
+      if (job) updateReportProgress(job, admin.id, phase, done, total);
+    };
 
-    const { items } = await searchChannelsAll(keyword, MAX_ADMIN_SEARCH_RESULTS);
+    track("search", 0, 0);
+    const { items } = await searchChannelsAll(
+      keyword,
+      MAX_ADMIN_SEARCH_RESULTS,
+      (fetched, total) => track("search", fetched, total)
+    );
     // 报表需要用量 + 状态（key数量列取聚合 key 数 multiKeySize）；用量读失败兜底列表自带值
-    const rows = await enrichChannelRows(items);
+    track("enrich", 0, items.length);
+    const rows = await enrichChannelRows(items, {
+      onProgress: (done, total) => track("enrich", done, total),
+    });
+    track("done", items.length, items.length);
 
     const dateStr = new Date().toISOString().slice(0, 10);
     return csvResponse(channelRowsToCsv(rows), `渠道报表_${keyword}_${dateStr}.csv`);

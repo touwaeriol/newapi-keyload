@@ -3,6 +3,7 @@
 // 渠道搜索结果表格（管理员「渠道管理」与用户「渠道列表」共用）：
 // naci ID / 渠道名 / 优先级 / 站点状态 / key 存活 / 金额 / 创建时间，附翻页条。
 import { useEffect, useState } from "react";
+import { apiFetch } from "@/lib/client";
 import { Badge, Button } from "@/components/ui";
 
 /** naci 额度换算美元的除数（与 lib/naci.ts QUOTA_PER_USD 一致；lib 为服务端模块，前端不直接 import）。 */
@@ -62,19 +63,73 @@ export function useElapsedSeconds(active: boolean): number {
   return sec;
 }
 
+/** 报表生成进度（/api/report-progress 返回；lib/reportProgress.ts 的前端镜像）。 */
+export interface ReportProgress {
+  phase: "pending" | "search" | "enrich" | "done";
+  done: number;
+  total: number;
+}
+
+/** 生成一个报表进度 jobId（浏览器不支持 randomUUID 时退化为时间戳+随机串）。 */
+export function newReportJobId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 /**
- * 报表下载按钮文案：生成中显示「已耗时 / 预估」。
- * 预估按服务端节奏算：每 40 个渠道一块、块间 300ms，加 naci 往返按每块 ~1.2s 估。
+ * 下载报表期间每秒轮询一次服务端进度；jobId 为 null 时不轮询并清空。
+ * 轮询失败静默忽略（进度是锦上添花，不打断下载本身）。
+ */
+export function useReportProgress(jobId: string | null): ReportProgress | null {
+  const [progress, setProgress] = useState<ReportProgress | null>(null);
+  useEffect(() => {
+    if (!jobId) {
+      setProgress(null);
+      return;
+    }
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const p = await apiFetch<ReportProgress>(
+          `/api/report-progress?job=${encodeURIComponent(jobId)}`
+        );
+        if (!stopped) setProgress(p);
+      } catch {
+        /* 忽略单次轮询失败，下一秒重试 */
+      }
+    };
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => {
+      stopped = true;
+      clearInterval(t);
+    };
+  }, [jobId]);
+  return progress;
+}
+
+/**
+ * 报表下载按钮文案：按服务端上报的真实进度分两阶段展示——
+ * 拉列表（search）→ 补用量（enrich），各自「已处理/总数」；进度未知时兜底显示已耗时。
  */
 export function downloadButtonLabel(
   downloading: boolean,
   elapsedSec: number,
-  totalChannels: number
+  progress: ReportProgress | null
 ): string {
   if (!downloading) return "📥 下载报表";
-  if (totalChannels <= 0) return `生成中 ${elapsedSec}s…`;
-  const est = Math.max(3, Math.ceil(Math.ceil(totalChannels / 40) * 1.2));
-  return `生成中 ${elapsedSec}s / 约${est}s`;
+  if (progress?.phase === "enrich" && progress.total > 0) {
+    return `生成中 ${progress.done}/${progress.total} · ${elapsedSec}s`;
+  }
+  if (progress?.phase === "search" && progress.total > 0) {
+    return `拉取列表 ${progress.done}/${progress.total} · ${elapsedSec}s`;
+  }
+  if (progress?.phase === "done") {
+    return `传输中 ${progress.total}/${progress.total} · ${elapsedSec}s`;
+  }
+  return `生成中 ${elapsedSec}s…`;
 }
 
 function SiteDot({ site }: { site: SiteStatus }) {
