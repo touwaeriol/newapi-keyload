@@ -197,6 +197,10 @@ async function createTables(pool: Pool): Promise<void> {
   await pool.query(
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS high_priority_limit integer`
   );
+  // 单独关闭某用户的上传权限（默认 false=不关闭）。
+  await pool.query(
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS upload_disabled boolean NOT NULL DEFAULT false`
+  );
   await pool.query(`
     CREATE TABLE IF NOT EXISTS config (
       id int PRIMARY KEY DEFAULT 1,
@@ -492,6 +496,7 @@ interface UserRow {
   upload_limit_window_minutes: number | null;
   allow_high_priority: boolean | null;
   high_priority_limit: number | null;
+  upload_disabled: boolean | null;
   created_at: Date | string;
   updated_at: Date | string;
 }
@@ -522,6 +527,7 @@ function rowToUser(r: UserRow): User {
       r.allow_high_priority == null ? true : Boolean(r.allow_high_priority),
     highPriorityLimit:
       r.high_priority_limit == null ? null : Number(r.high_priority_limit),
+    uploadDisabled: r.upload_disabled == null ? false : Boolean(r.upload_disabled),
     createdAt: toIso(r.created_at),
     updatedAt: toIso(r.updated_at),
   };
@@ -573,8 +579,8 @@ export async function findUserByChannelName(
 export async function upsertUser(user: User): Promise<void> {
   const pool = await ensureReady();
   await pool.query(
-    `INSERT INTO users (id, username, role, access_key, channel_name, channel_id, upload_limit_count, upload_limit_window_minutes, allow_high_priority, high_priority_limit, created_at, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+    `INSERT INTO users (id, username, role, access_key, channel_name, channel_id, upload_limit_count, upload_limit_window_minutes, allow_high_priority, high_priority_limit, upload_disabled, created_at, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
      ON CONFLICT (id) DO UPDATE SET
        username = EXCLUDED.username,
        role = EXCLUDED.role,
@@ -585,6 +591,7 @@ export async function upsertUser(user: User): Promise<void> {
        upload_limit_window_minutes = EXCLUDED.upload_limit_window_minutes,
        allow_high_priority = EXCLUDED.allow_high_priority,
        high_priority_limit = EXCLUDED.high_priority_limit,
+       upload_disabled = EXCLUDED.upload_disabled,
        created_at = EXCLUDED.created_at,
        updated_at = EXCLUDED.updated_at`,
     [
@@ -598,6 +605,7 @@ export async function upsertUser(user: User): Promise<void> {
       user.uploadLimitWindowMinutes ?? null,
       user.allowHighPriority ?? true,
       user.highPriorityLimit ?? null,
+      user.uploadDisabled ?? false,
       user.createdAt,
       user.updatedAt,
     ]
@@ -737,7 +745,7 @@ export async function saveConfig(cfg: SystemConfig): Promise<void> {
   const models = (cfg.models ?? "").trim() || SEED_MODELS;
   await pool.query(
     `INSERT INTO config (id, naci_base_url, naci_token, naci_username, naci_password, models, upload_batch_size, process_batch_size, auto_refill_enabled, refill_interval_minutes, priority6_limit, demote_interval_seconds, demote_grace_seconds, usage_refresh_interval_minutes, usage_max_updates, global_upload_limit_count, global_upload_limit_window_minutes, user_upload_limit_count, user_upload_limit_window_minutes, user_manual_upload_enabled, only_high_priority_enabled, upload_disabled, user_query_interval_seconds, user_report_interval_minutes)
-     VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+     VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
      ON CONFLICT (id) DO UPDATE SET
        naci_base_url = EXCLUDED.naci_base_url,
        naci_token = EXCLUDED.naci_token,

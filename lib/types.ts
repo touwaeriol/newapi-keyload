@@ -27,6 +27,8 @@ export interface User {
   allowHighPriority?: boolean;
   /** 该用户可占用的优先级6渠道数量上限（全局6的子上限；NULL=不设独立上限，仅受全局约束） */
   highPriorityLimit?: number | null;
+  /** 单独关闭该用户的上传权限：true=其人工上传（上传一批/直接上传）一律拒绝（默认 false）。与全局总闸并存 */
+  uploadDisabled?: boolean;
   createdAt: string;
   updatedAt: string;
 }

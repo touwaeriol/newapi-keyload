@@ -135,11 +135,19 @@ function sitesWithNames(
   }));
 }
 
+/** 用户级禁上传闸：管理员单独关闭了该用户的上传权限时，人工上传一律拒绝（引擎路径不走此校验）。 */
+function assertUserUploadAllowed(user: User): void {
+  if (user.uploadDisabled) {
+    throw new Error("该用户的上传权限已被管理员关闭，暂时无法提交 key");
+  }
+}
+
 /** 上传入口：只把 key 落本地池（按前缀归组），不直接建渠道（由手动按钮 / 定时引擎逐批建）。 */
 export async function enqueueKeys(
   user: User,
   keys: string[]
 ): Promise<{ added: number; poolPending: number; poolUploaded: number }> {
+  assertUserUploadAllowed(user);
   const prefix = user.channelName.trim();
   if (!prefix) {
     throw new Error("当前用户未配置渠道前缀，无法上传 key");
@@ -220,6 +228,9 @@ export async function createChannelFromNextBatch(
 ): Promise<CreateBatchResult> {
   const prefix = user.channelName.trim();
   if (!prefix) throw new Error("当前用户未配置渠道前缀，无法上传 key");
+
+  // 用户级禁上传：仅拦手动路径；定时引擎(viaScheduler)不受限，仍可消化本地池已有 key
+  if (!opts.viaScheduler) assertUserUploadAllowed(user);
 
   const cfg = await getConfig();
   const eff = effectiveUserLimit(user, cfg);
@@ -603,6 +614,7 @@ export async function directUploadKeys(
   user: User,
   keys: string[]
 ): Promise<DirectUploadResult> {
+  assertUserUploadAllowed(user);
   const prefix = user.channelName.trim();
   if (!prefix) {
     throw new Error("当前用户未配置渠道前缀，无法上传 key");
@@ -1154,8 +1166,8 @@ export async function resolveMyChannel(user: User) {
   // 是否允许手动上传（全局开关；管理员不受限，普通用户看全局配置）
   const manualUploadEnabled =
     user.role === "admin" ? true : cfg.userManualUploadEnabled;
-  // 全局禁止上传总闸：对所有人生效（含管理员），前端据此禁用所有上传按钮
-  const uploadDisabled = cfg.uploadDisabled === true;
+  // 禁止上传：全局总闸 或 该用户被单独关闭上传权限；前端据此禁用所有上传按钮
+  const uploadDisabled = cfg.uploadDisabled === true || user.uploadDisabled === true;
   // 高优先级(优先级6)配额：全局已用/上限（跨所有用户）+ 本用户已用/独立上限
   const hpGlobalUsed = await countChannelsAtPriority(FIXED_PRIORITY);
   const hpGlobalLimit = cfg.priority6Limit;

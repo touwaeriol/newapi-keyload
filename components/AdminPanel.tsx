@@ -460,6 +460,43 @@ function ConfigCard() {
         <LoadingRow />
       ) : (
         <div className="space-y-4">
+          {/* 全局禁止上传总闸：放最顶、做成大号开关，一眼可见 */}
+          <button
+            type="button"
+            onClick={() => setUploadDisabled((v) => !v)}
+            className={`flex w-full items-center justify-between rounded-xl border-2 px-4 py-3 text-left transition ${
+              uploadDisabled
+                ? "border-rose-300 bg-rose-50"
+                : "border-slate-200 bg-white hover:bg-slate-50"
+            }`}
+          >
+            <div>
+              <div
+                className={`text-sm font-semibold ${
+                  uploadDisabled ? "text-rose-700" : "text-slate-700"
+                }`}
+              >
+                🚫 全局禁止上传（总闸）
+              </div>
+              <div className="mt-0.5 text-xs text-slate-500">
+                {uploadDisabled
+                  ? "已开启：所有人（含管理员代传）都无法提交 key，前端上传按钮全部禁用；不影响引擎消化本地池。改动需点「保存」生效"
+                  : "关闭中：上传正常。开启后立即拦截所有人工上传，用于紧急停摆 / naci 维护。改动需点「保存」生效"}
+              </div>
+            </div>
+            <span
+              className={`relative ml-4 inline-flex h-7 w-12 shrink-0 items-center rounded-full transition ${
+                uploadDisabled ? "bg-rose-500" : "bg-slate-300"
+              }`}
+            >
+              <span
+                className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition ${
+                  uploadDisabled ? "translate-x-6" : "translate-x-1"
+                }`}
+              />
+            </span>
+          </button>
+
           <ConfigSection title="连接配置" desc="naci 后端登录凭据与建渠道模型">
             <CompactField label="naciBaseUrl">
               <TextInput
@@ -627,14 +664,6 @@ function ConfigCard() {
               value={gLimitWindow}
               onChange={setGLimitWindow}
               placeholder={String(DEFAULT_UPLOAD_LIMIT_WINDOW)}
-            />
-            <CheckField
-              label="🚫 全局禁止上传（总闸）"
-              hint="开启后所有人（含管理员代传）的「上传一批 / 直接上传」全部拒绝，前端按钮禁用；不影响引擎继续消化本地池已有 key。用于紧急停摆 / naci 维护"
-              checked={uploadDisabled}
-              onChange={setUploadDisabled}
-              onText="已全局禁止上传"
-              offText="上传正常"
             />
             <CheckField
               label="禁止用户手动上传"

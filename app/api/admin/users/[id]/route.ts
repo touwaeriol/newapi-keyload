@@ -34,6 +34,8 @@ export async function PUT(
       allowHighPriority?: boolean;
       /** 独立优先级6数量上限：数字=设定（≥0），显式 null=清除（仅受全局），未传=不动 */
       highPriorityLimit?: number | null;
+      /** 单独关闭该用户上传权限；未传=不动 */
+      uploadDisabled?: boolean;
     };
 
     if (typeof body.username === "string") {
@@ -110,6 +112,10 @@ export async function PUT(
         }
         target.highPriorityLimit = Math.min(v, 1000);
       }
+    }
+
+    if (typeof body.uploadDisabled === "boolean") {
+      target.uploadDisabled = body.uploadDisabled;
     }
 
     if (body.regenerateKey) {

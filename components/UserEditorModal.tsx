@@ -39,6 +39,8 @@ export function UserEditorModal({
   // 按用户高优先级配额
   const [allowHighPriority, setAllowHighPriority] = useState(true);
   const [highPriorityLimit, setHighPriorityLimit] = useState("");
+  // 单独关闭该用户上传权限
+  const [uploadDisabled, setUploadDisabled] = useState(false);
   const [loading, setLoading] = useState(false);
 
   // 保存成功后要展示的完整密钥（新建 / 重置密钥）
@@ -66,6 +68,7 @@ export function UserEditorModal({
     setHighPriorityLimit(
       target?.highPriorityLimit == null ? "" : String(target.highPriorityLimit)
     );
+    setUploadDisabled(target?.uploadDisabled === true);
     setRegenerateKey(false);
     setRevealed(null);
   }, [open, target]);
@@ -130,6 +133,7 @@ export function UserEditorModal({
               uploadLimitWindowMinutes,
               allowHighPriority,
               highPriorityLimit: highPriorityLimitVal,
+              uploadDisabled,
             }),
           }
         );
@@ -291,6 +295,29 @@ export function UserEditorModal({
               />
             </Field>
           </div>
+        )}
+
+        {isEdit && (
+          <label
+            className={`flex cursor-pointer items-center justify-between rounded-lg border px-3 py-2.5 text-sm ${
+              uploadDisabled
+                ? "border-rose-300 bg-rose-50 text-rose-700"
+                : "border-slate-200 bg-white text-slate-600"
+            }`}
+          >
+            <span className="font-medium">
+              🚫 禁止该用户上传
+              <span className="ml-2 font-normal text-slate-400">
+                开启后其「上传一批 / 直接上传」一律拒绝
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              checked={uploadDisabled}
+              onChange={(e) => setUploadDisabled(e.target.checked)}
+              className="h-4 w-4 rounded border-slate-300 text-rose-600 focus:ring-rose-400"
+            />
+          </label>
         )}
 
         {isEdit && (

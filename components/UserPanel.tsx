@@ -279,7 +279,7 @@ function ChannelCard({
             disabled={uploadDisabled || manualDisabled || onlyHigh}
             title={
               uploadDisabled
-                ? "管理员已全局禁止上传，暂时无法提交"
+                ? "管理员已禁止上传，暂时无法提交"
                 : onlyHigh
                 ? "仅高优先级模式：渠道由定时任务在各用户间公平分配，请用「直接上传」上传 key"
                 : manualDisabled
@@ -402,7 +402,7 @@ function UploadCard({
       <div className="space-y-3">
         {uploadDisabled ? (
           <p className="rounded-lg bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
-            🚫 管理员已全局禁止上传，暂时无法提交 key，请稍后再试或联系管理员。
+            🚫 管理员已禁止上传，暂时无法提交 key，请稍后再试或联系管理员。
           </p>
         ) : (
           !manualUploadEnabled && (
