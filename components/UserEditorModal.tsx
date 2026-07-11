@@ -33,6 +33,8 @@ export function UserEditorModal({
   const [role, setRole] = useState<Role>("user");
   const [channelName, setChannelName] = useState("");
   const [regenerateKey, setRegenerateKey] = useState(false);
+  // 可选自定义访问密钥（留空=新建时自动生成 / 编辑时不改）
+  const [customKey, setCustomKey] = useState("");
   // 单用户上传限速覆盖（字符串态，空串=跟随全局默认→提交 null）
   const [limitCount, setLimitCount] = useState("");
   const [limitWindow, setLimitWindow] = useState("");
@@ -70,6 +72,7 @@ export function UserEditorModal({
     );
     setUploadDisabled(target?.uploadDisabled === true);
     setRegenerateKey(false);
+    setCustomKey("");
     setRevealed(null);
   }, [open, target]);
 
@@ -87,6 +90,18 @@ export function UserEditorModal({
     if (!channelName.trim()) {
       toast.error("请输入渠道前缀");
       return;
+    }
+    // 自定义访问密钥（可选）：填了就前置校验，避免白跑一趟后端
+    const customKeyVal = customKey.trim();
+    if (customKeyVal !== "") {
+      if (customKeyVal.length < 6) {
+        toast.error("自定义访问密钥至少 6 个字符");
+        return;
+      }
+      if (/\s/.test(customKeyVal)) {
+        toast.error("自定义访问密钥不能包含空格");
+        return;
+      }
     }
     // 单用户限速覆盖：空串=null（跟随全局默认），否则必须是合法数字
     let uploadLimitCount: number | null = null;
@@ -134,12 +149,13 @@ export function UserEditorModal({
               allowHighPriority,
               highPriorityLimit: highPriorityLimitVal,
               uploadDisabled,
+              accessKey: customKeyVal || undefined,
             }),
           }
         );
         onSaved();
-        if (regenerateKey && data.user?.accessKey) {
-          // 展示新密钥，不直接关闭
+        if ((regenerateKey || customKeyVal) && data.user?.accessKey) {
+          // 密钥有变（随机重置或自定义）→ 展示供复制，不直接关闭
           setRevealed({
             username: username.trim(),
             accessKey: data.user.accessKey,
@@ -158,6 +174,7 @@ export function UserEditorModal({
               username: username.trim(),
               role,
               channelName: channelName.trim(),
+              accessKey: customKeyVal || undefined,
             }),
           }
         );
@@ -266,6 +283,24 @@ export function UserEditorModal({
           />
         </Field>
 
+        <Field
+          label="访问密钥（可选自定义）"
+          hint={
+            isEdit
+              ? "填写=改成此密钥（≥6位、无空格，全局唯一），旧密钥立即失效；留空=不改"
+              : "留空=自动生成 uk-… ；也可自定义（≥6位、无空格，全局唯一）"
+          }
+        >
+          <TextInput
+            value={customKey}
+            onChange={(e) => setCustomKey(e.target.value)}
+            placeholder={isEdit ? "留空=不改" : "留空=自动生成"}
+            autoComplete="off"
+            spellCheck={false}
+            className="font-mono"
+          />
+        </Field>
+
         {isEdit && (
           <div className="grid grid-cols-2 gap-3">
             <Field
@@ -349,14 +384,24 @@ export function UserEditorModal({
         )}
 
         {isEdit && (
-          <label className="flex cursor-pointer items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600">
+          <label
+            className={`flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm ${
+              customKey.trim()
+                ? "cursor-not-allowed text-slate-400"
+                : "cursor-pointer text-slate-600"
+            }`}
+          >
             <input
               type="checkbox"
-              checked={regenerateKey}
+              checked={regenerateKey && !customKey.trim()}
+              disabled={!!customKey.trim()}
               onChange={(e) => setRegenerateKey(e.target.checked)}
               className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-400"
             />
-            重置访问密钥（旧密钥立即失效）
+            随机重置访问密钥（旧密钥立即失效）
+            {customKey.trim() && (
+              <span className="text-xs">— 已填自定义密钥，此项忽略</span>
+            )}
           </label>
         )}
       </form>

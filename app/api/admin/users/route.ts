@@ -5,6 +5,7 @@ import {
   genAccessKey,
   genId,
   getUsers,
+  normalizeCustomAccessKey,
   poolCountsAll,
   upsertUser,
 } from "@/lib/store";
@@ -49,6 +50,8 @@ export async function POST(req: NextRequest) {
       username?: string;
       role?: Role;
       channelName?: string;
+      /** 可选自定义访问密钥；留空/未传=自动生成 */
+      accessKey?: string;
     };
     const username = (body.username ?? "").trim();
     const channelName = (body.channelName ?? "").trim();
@@ -64,12 +67,23 @@ export async function POST(req: NextRequest) {
       return fail("该渠道名已被其他用户绑定");
     }
 
+    // 访问密钥：管理员填了就用自定义（校验+查重），否则自动生成
+    let accessKey = genAccessKey();
+    if (typeof body.accessKey === "string" && body.accessKey.trim() !== "") {
+      const r = normalizeCustomAccessKey(body.accessKey);
+      if ("error" in r) return fail(r.error);
+      if (users.some((u) => u.accessKey === r.value)) {
+        return fail("该访问密钥已被占用，请换一个");
+      }
+      accessKey = r.value;
+    }
+
     const now = new Date().toISOString();
     const user: User = {
       id: genId(),
       username,
       role,
-      accessKey: genAccessKey(),
+      accessKey,
       channelName,
       channelId: null,
       createdAt: now,

@@ -5,6 +5,7 @@ import {
   findUserById,
   genAccessKey,
   getUsers,
+  normalizeCustomAccessKey,
   upsertUser,
 } from "@/lib/store";
 import type { Role } from "@/lib/types";
@@ -36,6 +37,8 @@ export async function PUT(
       highPriorityLimit?: number | null;
       /** 单独关闭该用户上传权限；未传=不动 */
       uploadDisabled?: boolean;
+      /** 自定义访问密钥：填写=改成此值（校验+查重），留空/未传=不改（除非 regenerateKey） */
+      accessKey?: string;
     };
 
     if (typeof body.username === "string") {
@@ -118,7 +121,16 @@ export async function PUT(
       target.uploadDisabled = body.uploadDisabled;
     }
 
-    if (body.regenerateKey) {
+    // 访问密钥：自定义优先（校验+排他查重），否则 regenerateKey 随机重置，否则不动
+    if (typeof body.accessKey === "string" && body.accessKey.trim() !== "") {
+      const r = normalizeCustomAccessKey(body.accessKey);
+      if ("error" in r) return fail(r.error);
+      const users = await getUsers();
+      if (users.some((u) => u.accessKey === r.value && u.id !== target.id)) {
+        return fail("该访问密钥已被占用，请换一个");
+      }
+      target.accessKey = r.value;
+    } else if (body.regenerateKey) {
       target.accessKey = genAccessKey();
     }
 

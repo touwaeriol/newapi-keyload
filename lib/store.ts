@@ -137,6 +137,20 @@ export function genAccessKey(prefix = "uk"): string {
   return `${prefix}-${crypto.randomBytes(18).toString("base64url")}`;
 }
 
+/**
+ * 校验管理员手填的自定义访问密钥：去首尾空格后要求 6~128 位、不含空白字符。
+ * 通过返回 { value: 规范化后的密钥 }，否则返回 { error: 中文原因 }。
+ */
+export function normalizeCustomAccessKey(
+  raw: string
+): { value: string } | { error: string } {
+  const v = raw.trim();
+  if (v.length < 6) return { error: "自定义访问密钥至少 6 个字符" };
+  if (v.length > 128) return { error: "自定义访问密钥不能超过 128 个字符" };
+  if (/\s/.test(v)) return { error: "自定义访问密钥不能包含空格" };
+  return { value: v };
+}
+
 function sha256(input: string): string {
   return crypto.createHash("sha256").update(input, "utf8").digest("hex");
 }
