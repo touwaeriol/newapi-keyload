@@ -85,9 +85,12 @@ export const LAST_SELECTED_SITE_IDS_JSON = JSON.stringify(
   [21, 13, 6].filter((id) => !EXCLUDED_SITE_IDS.includes(id))
 );
 
-/** 渠道高级设置（setting 字段，JSON 字符串）。含 error_filter_mode:2（对齐示例请求体）。 */
+/**
+ * 渠道高级设置（setting 字段，JSON 字符串）。含 error_filter_mode:2（对齐示例请求体）。
+ * 不再携带 proxy 字段——新建渠道一律不走代理（按运营要求去掉）。
+ */
 const CHANNEL_SETTING =
-  '{"proxy":"","concurrency_protection_enabled":false,"max_concurrency":500,"concurrency_protection_threshold":60,"error_filter_mode":2,"ramp_up_minutes":5,"ramp_recovery_threshold":54,"ramp_reach_threshold":90,"ramp_up_confirm_windows":1,"ramp_down_load_threshold":10,"ramp_down_unhealthy_windows":2}';
+  '{"concurrency_protection_enabled":false,"max_concurrency":500,"concurrency_protection_threshold":60,"error_filter_mode":2,"ramp_up_minutes":5,"ramp_recovery_threshold":54,"ramp_reach_threshold":90,"ramp_up_confirm_windows":1,"ramp_down_load_threshold":10,"ramp_down_unhealthy_windows":2}';
 
 /**
  * channel_json 内部对象的固定字段模板（不含 name / key）。
