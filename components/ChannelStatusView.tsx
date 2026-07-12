@@ -158,7 +158,7 @@ function fmtCreatedAt(at?: string): string | null {
   if (!at) return null;
   const d = new Date(at);
   if (Number.isNaN(d.getTime())) return null;
-  return d.toLocaleString("zh-CN", { hour12: false });
+  return d.toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" });
 }
 
 /** 聚合可用 key 数 = 平台 key 数 − 禁用 key 数；任一缺失返回 null（显示「-」） */

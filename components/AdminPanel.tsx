@@ -1191,7 +1191,7 @@ function UsersCard() {
           {lastRefreshedAt && (
             <span className="hidden text-xs text-slate-400 sm:inline">
               自动刷新中 · 最后 {" "}
-              {lastRefreshedAt.toLocaleTimeString("zh-CN", { hour12: false })}
+              {lastRefreshedAt.toLocaleTimeString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" })}
             </span>
           )}
           <Button onClick={openCreate}>新建用户</Button>
@@ -1471,5 +1471,5 @@ function maskKey(k: string) {
 function formatTime(at: string) {
   const d = new Date(at);
   if (Number.isNaN(d.getTime())) return at;
-  return d.toLocaleString("zh-CN", { hour12: false });
+  return d.toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" });
 }

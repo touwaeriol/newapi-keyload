@@ -42,7 +42,7 @@ export function fmtTime(ts: string) {
   if (!ts) return "";
   const d = new Date(ts.length === 19 ? ts + "Z" : ts);
   if (Number.isNaN(d.getTime())) return ts;
-  return d.toLocaleString("zh-CN", { hour12: false });
+  return d.toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" });
 }
 
 /** active 期间每 0.5s 更新一次的已耗时秒数（active 变 false 归零）。 */
