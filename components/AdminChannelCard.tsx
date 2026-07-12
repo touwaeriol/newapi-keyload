@@ -28,6 +28,7 @@ export function AdminChannelCard() {
   const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [downloadJob, setDownloadJob] = useState<string | null>(null);
+  const [dlFmt, setDlFmt] = useState<"csv" | "xlsx" | null>(null);
   const [allItems, setAllItems] = useState<ChannelItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -50,16 +51,17 @@ export function AdminChannelCard() {
     }
   }, [keyword, t]);
 
-  const download = useCallback(async () => {
+  const download = useCallback(async (format: "csv" | "xlsx") => {
     const kw = keyword.trim();
     if (!kw) return;
     const job = newReportJobId();
     setDownloadJob(job);
+    setDlFmt(format);
     setDownloading(true);
     try {
       const key = getStoredKey();
       const res = await fetch(
-        `/api/admin/channels/download?keyword=${encodeURIComponent(kw)}&job=${job}`,
+        `/api/admin/channels/download?keyword=${encodeURIComponent(kw)}&job=${job}&format=${format}`,
         { headers: key ? { "x-access-key": key } : {} }
       );
       if (!res.ok) {
@@ -78,7 +80,7 @@ export function AdminChannelCard() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `渠道报表_${kw}_${new Date().toISOString().slice(0, 10)}.csv`;
+      a.download = `渠道报表_${kw}_${new Date().toISOString().slice(0, 10)}.${format}`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -89,6 +91,7 @@ export function AdminChannelCard() {
     } finally {
       setDownloading(false);
       setDownloadJob(null);
+      setDlFmt(null);
     }
   }, [keyword, t]);
 
@@ -119,14 +122,30 @@ export function AdminChannelCard() {
             🔍 搜索
           </Button>
           {total > 0 && (
-            <Button
-              variant="secondary"
-              onClick={download}
-              loading={downloading}
-              title="生成 CSV 报表：服务端逐块拉取全部命中渠道的实时用量与 key 状态，渠道多时需要几十秒"
-            >
-              {downloadButtonLabel(downloading, downloadSec, downloadProgress)}
-            </Button>
+            <>
+              <Button
+                variant="secondary"
+                onClick={() => download("csv")}
+                loading={dlFmt === "csv"}
+                disabled={downloading}
+                title="下载 CSV 报表（UTF-8 BOM，Excel 可直接打开）"
+              >
+                {dlFmt === "csv"
+                  ? downloadButtonLabel(true, downloadSec, downloadProgress)
+                  : "📥 CSV"}
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() => download("xlsx")}
+                loading={dlFmt === "xlsx"}
+                disabled={downloading}
+                title="下载 Excel(.xlsx) 报表"
+              >
+                {dlFmt === "xlsx"
+                  ? downloadButtonLabel(true, downloadSec, downloadProgress)
+                  : "📊 Excel"}
+              </Button>
+            </>
           )}
         </div>
       }

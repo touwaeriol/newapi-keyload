@@ -13,6 +13,7 @@ import {
   reserveBucketMs,
 } from "./rateLimit";
 import { SITES } from "./supplier";
+import ExcelJS from "exceljs";
 
 /** 管理员搜索/下载的全量拉取上限（超过要求细化关键词，保护 naci 与响应体积）。 */
 export const MAX_ADMIN_SEARCH_RESULTS = 5000;
@@ -237,6 +238,71 @@ export function csvResponse(csv: string, filename: string): Response {
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
       "Content-Disposition": `attachment; filename="${encodeURIComponent(filename)}"`,
+    },
+  });
+}
+
+/**
+ * 渠道行 → xlsx(Excel) 报表 Buffer。列与合计逻辑同 CSV（channelRowsToCsv），
+ * 但数值列是真正的数字单元格（Excel 里可直接求和/排序），首行与合计行加粗。
+ */
+export async function channelRowsToXlsx(
+  rows: ChannelSearchRow[]
+): Promise<ArrayBuffer> {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("渠道报表");
+  ws.columns = [
+    { header: "naci_id", key: "id", width: 12 },
+    { header: "渠道名", key: "name", width: 30 },
+    { header: "优先级", key: "priority", width: 8 },
+    { header: "key数量", key: "keyCount", width: 10 },
+    { header: "used_quota", key: "usedQuota", width: 14 },
+    { header: "金额USD", key: "usd", width: 12 },
+    { header: "创建时间", key: "createdAt", width: 22 },
+  ];
+  ws.getRow(1).font = { bold: true };
+  let totalKeys = 0;
+  let unknownKeyRows = 0;
+  let totalQuota = 0;
+  for (const r of rows) {
+    const keyCount = r.hasStatus && r.multiKeySize > 0 ? r.multiKeySize : null;
+    if (keyCount == null) unknownKeyRows += 1;
+    else totalKeys += keyCount;
+    totalQuota += r.used_quota;
+    ws.addRow({
+      id: r.id,
+      name: r.name,
+      priority: r.priority ?? "",
+      keyCount: keyCount ?? "",
+      usedQuota: r.used_quota,
+      usd: Number((r.used_quota / QUOTA_PER_USD).toFixed(2)),
+      createdAt: r.created_at,
+    });
+  }
+  const label =
+    unknownKeyRows > 0
+      ? `合计(${rows.length}渠道,其中${unknownKeyRows}个key数未知)`
+      : `合计(${rows.length}渠道)`;
+  const totalRow = ws.addRow({
+    id: label,
+    keyCount: totalKeys,
+    usedQuota: totalQuota,
+    usd: Number((totalQuota / QUOTA_PER_USD).toFixed(2)),
+  });
+  totalRow.font = { bold: true };
+  return (await wb.xlsx.writeBuffer()) as ArrayBuffer;
+}
+
+/** xlsx(Excel) 下载响应。 */
+export function xlsxResponse(buf: ArrayBuffer, filename: string): Response {
+  return new Response(buf, {
+    status: 200,
+    headers: {
+      "Content-Type":
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "Content-Disposition": `attachment; filename="${encodeURIComponent(
+        filename
+      )}"`,
     },
   });
 }

@@ -3,9 +3,11 @@ import { errorResponse, fail, requireAdmin } from "@/lib/auth";
 import { searchChannelsAll } from "@/lib/naci";
 import {
   channelRowsToCsv,
+  channelRowsToXlsx,
   csvResponse,
   enrichChannelRows,
   MAX_ADMIN_SEARCH_RESULTS,
+  xlsxResponse,
 } from "@/lib/channelSearch";
 import { updateReportProgress } from "@/lib/reportProgress";
 
@@ -42,6 +44,13 @@ export async function GET(req: NextRequest) {
     track("done", items.length, items.length);
 
     const dateStr = new Date().toISOString().slice(0, 10);
+    const format = (req.nextUrl.searchParams.get("format") || "csv").toLowerCase();
+    if (format === "xlsx") {
+      return xlsxResponse(
+        await channelRowsToXlsx(rows),
+        `渠道报表_${keyword}_${dateStr}.xlsx`
+      );
+    }
     return csvResponse(channelRowsToCsv(rows), `渠道报表_${keyword}_${dateStr}.csv`);
   } catch (err) {
     return errorResponse(err);

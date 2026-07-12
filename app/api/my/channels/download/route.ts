@@ -5,10 +5,12 @@ import { getConfig } from "@/lib/store";
 import {
   acquireUserReportSlot,
   channelRowsToCsv,
+  channelRowsToXlsx,
   csvResponse,
   enrichChannelRows,
   MAX_USER_SEARCH_RESULTS,
   ownChannelNameFilter,
+  xlsxResponse,
 } from "@/lib/channelSearch";
 import { updateReportProgress } from "@/lib/reportProgress";
 
@@ -58,6 +60,13 @@ export async function GET(req: NextRequest) {
       track("done", mine.length, mine.length);
 
       const dateStr = new Date().toISOString().slice(0, 10);
+      const format = (req.nextUrl.searchParams.get("format") || "csv").toLowerCase();
+      if (format === "xlsx") {
+        return xlsxResponse(
+          await channelRowsToXlsx(rows),
+          `渠道报表_${prefix}_${dateStr}.xlsx`
+        );
+      }
       return csvResponse(channelRowsToCsv(rows), `渠道报表_${prefix}_${dateStr}.csv`);
     } catch (err) {
       // naci 侧失败不该烧掉这一格额度：退还后再抛，让用户可立即重试
