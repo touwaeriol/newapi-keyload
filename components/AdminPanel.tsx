@@ -1494,10 +1494,35 @@ interface GapItem {
   gap_tpm_est: number;
 }
 
-const CHANNEL_TYPE_NAMES: Record<number, string> = {
-  14: "Anthropic",
-  41: "VertexAI",
+/** 平台渠道类型 → 展示配置。未知类型回退到 slategray 兜底。 */
+const PLATFORM_META: Record<number, { label: string; icon: string; tone: "amber" | "indigo" | "cyan" | "slate"; border: string; bg: string }> = {
+  14: {
+    label: "Anthropic",
+    icon: "🧠",
+    tone: "amber",
+    border: "border-amber-200",
+    bg: "bg-amber-50/40",
+  },
+  41: {
+    label: "VertexAI",
+    icon: "🔷",
+    tone: "indigo",
+    border: "border-indigo-200",
+    bg: "bg-indigo-50/40",
+  },
 };
+
+function platformMeta(gt: GapItem) {
+  return (
+    PLATFORM_META[gt.channel_type] ?? {
+      label: gt.channel_type_name || `type ${gt.channel_type}`,
+      icon: "📡",
+      tone: "slate" as const,
+      border: "border-slate-200",
+      bg: "bg-slate-50/40",
+    }
+  );
+}
 
 function fmtGap(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -1506,7 +1531,7 @@ function fmtGap(n: number): string {
 }
 
 function ModelGapCard() {
-  const [siteId, setSiteId] = useState(6);
+  const [siteId, setSiteId] = useState(13); // 默认 AGT 站
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<{
     site_name: string;
@@ -1533,14 +1558,25 @@ function ModelGapCard() {
     }
   }
 
-  // 切站点自动刷新
-  useEffect(() => {
-    load();
-  }, [siteId]);
+  useEffect(() => { load(); }, [siteId]);
+
+  // 按渠道类型分组
+  const groups: { type: number; meta: ReturnType<typeof platformMeta>; items: GapItem[] }[] = [];
+  if (data) {
+    const map = new Map<number, GapItem[]>();
+    for (const g of data.items) {
+      const arr = map.get(g.channel_type) ?? [];
+      arr.push(g);
+      map.set(g.channel_type, arr);
+    }
+    for (const [type, items] of map.entries()) {
+      groups.push({ type, meta: platformMeta(items[0]), items });
+    }
+  }
 
   const checkedLabel =
     data && data.checked_at > 0
-      ? `取样时间：${new Date(data.checked_at * 1000).toLocaleString("zh-CN", {
+      ? `取样 ${new Date(data.checked_at * 1000).toLocaleString("zh-CN", {
           hour12: false,
           timeZone: "Asia/Shanghai",
         })}`
@@ -1549,7 +1585,7 @@ function ModelGapCard() {
   return (
     <Card
       title="📉 模型缺口"
-      subtitle={`${data ? data.site_name : "—"} — naci 平台该站各模型供给缺口（gap = 需求量 − 供应量）。${checkedLabel}`}
+      subtitle={data ? `${data.site_name} · ${checkedLabel}` : "naci 平台各模型供给缺口（gap = 需求量 − 供应量）"}
       actions={
         <div className="flex items-center gap-2">
           <select
@@ -1578,38 +1614,47 @@ function ModelGapCard() {
         </div>
       )}
       {data && !loading && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-slate-200 text-left text-xs text-slate-500">
-                <th className="pb-2 pr-2 font-medium">模型名</th>
-                <th className="pb-2 pr-2 font-medium">渠道类型</th>
-                <th className="pb-2 pr-2 text-right font-medium">Gap RPM</th>
-                <th className="pb-2 text-right font-medium">Gap TPM(估算)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.items.map((g, i) => (
-                <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
-                  <td className="py-2 pr-2 font-medium text-slate-800">{g.model_name}</td>
-                  <td className="py-2 pr-2 text-slate-500">
-                    {CHANNEL_TYPE_NAMES[g.channel_type] ?? g.channel_type_name ?? `type ${g.channel_type}`}
-                  </td>
-                  <td className="py-2 pr-2 text-right tabular-nums text-slate-700 font-medium">
-                    {fmtGap(g.gap_rpm)}
-                  </td>
-                  <td className="py-2 text-right tabular-nums text-slate-500">{fmtGap(g.gap_tpm_est)}</td>
-                </tr>
-              ))}
-              {data.items.length === 0 && (
-                <tr>
-                  <td colSpan={4} className="py-6 text-center text-slate-400">
-                    该站点暂无模型缺口数据
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+        <div className="space-y-4">
+          {groups.map((grp) => (
+            <div key={grp.type} className={`rounded-xl border ${grp.meta.border} ${grp.meta.bg} p-4`}>
+              <div className="mb-3 flex items-center gap-2">
+                <span className="text-lg">{grp.meta.icon}</span>
+                <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${
+                  grp.meta.tone === "amber" ? "bg-amber-100 text-amber-700" :
+                  grp.meta.tone === "indigo" ? "bg-indigo-100 text-indigo-700" :
+                  grp.meta.tone === "cyan" ? "bg-cyan-100 text-cyan-700" :
+                  "bg-slate-100 text-slate-600"
+                }`}>
+                  {grp.meta.label}
+                </span>
+                <span className="text-xs text-slate-400">{grp.items.length} 模型</span>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {grp.items.map((g, i) => (
+                  <div key={i} className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
+                    <div className="text-sm font-semibold text-slate-800">{g.model_name}</div>
+                    <div className="mt-1.5 flex items-center gap-4">
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wide text-slate-400">Gap RPM</div>
+                        <div className="text-base font-bold tabular-nums text-slate-800">
+                          {fmtGap(g.gap_rpm)}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wide text-slate-400">Gap TPM 估算</div>
+                        <div className="text-base font-bold tabular-nums text-slate-500">
+                          {fmtGap(g.gap_tpm_est)}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+          {groups.length === 0 && (
+            <p className="py-6 text-center text-sm text-slate-400">该站点暂无模型缺口数据</p>
+          )}
         </div>
       )}
     </Card>
