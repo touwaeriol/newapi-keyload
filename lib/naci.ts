@@ -887,3 +887,32 @@ export async function ping(): Promise<{ userId?: number; username?: string }> {
   );
   return { userId: env.data?.id, username: env.data?.username };
 }
+
+/** 模型缺口条目（GET /api/admin-hub/model-gaps?site_id=X 的 data.items 元素）。 */
+export interface ModelGapItem {
+  channel_type: number;
+  channel_type_name: string;
+  model_name: string;
+  gap_rpm: number;
+  gap_tpm_est: number;
+}
+
+/** 查询某个站点的模型缺口：GET /api/admin-hub/model-gaps?site_id=X。
+ *  返回站点名 + 缺口条目（按 gap_rpm 降序；check_at 为 naci 取样时间 unix 秒）。 */
+export async function getModelGaps(siteId: number): Promise<{
+  site_name: string;
+  checked_at: number;
+  items: ModelGapItem[];
+}> {
+  const env = await naciFetch<{
+    site_id: number;
+    site_name: string;
+    checked_at: number;
+    items: ModelGapItem[];
+  }>("GET", `/api/admin-hub/model-gaps?site_id=${siteId}`);
+  return {
+    site_name: env.data?.site_name ?? String(siteId),
+    checked_at: env.data?.checked_at ?? 0,
+    items: Array.isArray(env.data?.items) ? env.data.items : [],
+  };
+}

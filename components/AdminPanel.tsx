@@ -32,12 +32,13 @@ function toArray<T>(data: unknown, key: string): T[] {
   return [];
 }
 
-type AdminTab = "upload" | "channel" | "config";
+type AdminTab = "upload" | "channel" | "config" | "gaps";
 
 const ADMIN_TABS: { key: AdminTab; label: string }[] = [
   { key: "upload", label: "📤 Key上传管理" },
   { key: "channel", label: "📊 渠道管理" },
   { key: "config", label: "⚙️ 系统配置" },
+  { key: "gaps", label: "📉 模型缺口" },
 ];
 
 export function AdminPanel() {
@@ -70,6 +71,7 @@ export function AdminPanel() {
         </>
       )}
       {tab === "channel" && <AdminChannelCard />}
+      {tab === "gaps" && <ModelGapCard />}
       {tab === "config" && <ConfigCard />}
     </div>
   );
@@ -1472,4 +1474,144 @@ function formatTime(at: string) {
   const d = new Date(at);
   if (Number.isNaN(d.getTime())) return at;
   return d.toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" });
+}
+
+/* ============ 模型缺口卡 ============ */
+
+/** 可查询模型缺口的站点（naci SITES）。 */
+const GAP_SITES = [
+  { id: 6, label: "AC站" },
+  { id: 13, label: "AGT站" },
+  { id: 21, label: "61 站" },
+];
+
+/** /api/admin/model-gaps 返回的单条缺口。 */
+interface GapItem {
+  channel_type: number;
+  channel_type_name: string;
+  model_name: string;
+  gap_rpm: number;
+  gap_tpm_est: number;
+}
+
+const CHANNEL_TYPE_NAMES: Record<number, string> = {
+  14: "Anthropic",
+  41: "VertexAI",
+};
+
+function fmtGap(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(Math.round(n));
+}
+
+function ModelGapCard() {
+  const [siteId, setSiteId] = useState(6);
+  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<{
+    site_name: string;
+    checked_at: number;
+    items: GapItem[];
+  } | null>(null);
+  const [error, setError] = useState("");
+
+  async function load() {
+    setLoading(true);
+    setError("");
+    try {
+      const d = await apiFetch<{
+        site_name: string;
+        checked_at: number;
+        items: GapItem[];
+      }>(`/api/admin/model-gaps?site_id=${siteId}`);
+      setData(d);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // 切站点自动刷新
+  useEffect(() => {
+    load();
+  }, [siteId]);
+
+  const checkedLabel =
+    data && data.checked_at > 0
+      ? `取样时间：${new Date(data.checked_at * 1000).toLocaleString("zh-CN", {
+          hour12: false,
+          timeZone: "Asia/Shanghai",
+        })}`
+      : "";
+
+  return (
+    <Card
+      title="📉 模型缺口"
+      subtitle={`${data ? data.site_name : "—"} — naci 平台该站各模型供给缺口（gap = 需求量 − 供应量）。${checkedLabel}`}
+      actions={
+        <div className="flex items-center gap-2">
+          <select
+            value={siteId}
+            onChange={(e) => setSiteId(Number(e.target.value))}
+            className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700"
+          >
+            {GAP_SITES.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+          <Button onClick={load} loading={loading}>
+            🔄 刷新
+          </Button>
+        </div>
+      }
+    >
+      {error && (
+        <p className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p>
+      )}
+      {loading && (
+        <div className="flex items-center justify-center gap-2 py-8 text-slate-400">
+          <Spinner /> <span className="text-sm">拉取模型缺口数据…</span>
+        </div>
+      )}
+      {data && !loading && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-200 text-left text-xs text-slate-500">
+                <th className="pb-2 pr-2 font-medium">模型名</th>
+                <th className="pb-2 pr-2 font-medium">渠道类型</th>
+                <th className="pb-2 pr-2 text-right font-medium">Gap RPM</th>
+                <th className="pb-2 text-right font-medium">Gap TPM(估算)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.items.map((g, i) => (
+                <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
+                  <td className="py-2 pr-2 font-medium text-slate-800">{g.model_name}</td>
+                  <td className="py-2 pr-2 text-slate-500">
+                    {CHANNEL_TYPE_NAMES[g.channel_type] ?? g.channel_type_name ?? `type ${g.channel_type}`}
+                  </td>
+                  <td className="py-2 pr-2 text-right tabular-nums text-slate-700 font-medium">
+                    {fmtGap(g.gap_rpm)}
+                  </td>
+                  <td className="py-2 text-right tabular-nums text-slate-500">{fmtGap(g.gap_tpm_est)}</td>
+                </tr>
+              ))}
+              {data.items.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="py-6 text-center text-slate-400">
+                    该站点暂无模型缺口数据
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  );
 }
