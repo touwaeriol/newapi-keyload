@@ -1494,40 +1494,46 @@ interface GapItem {
   gap_tpm_est: number;
 }
 
-/** 平台渠道类型 → 展示配置。未知类型回退到 slategray 兜底。 */
-const PLATFORM_META: Record<number, { label: string; icon: string; tone: "amber" | "indigo" | "cyan" | "slate"; border: string; bg: string }> = {
+/** 平台渠道类型 → 展示配置（类型徽章色 + 模型名药丸色 + 图标）。未知类型回退 slate。 */
+const PLATFORM_META: Record<
+  number,
+  { label: string; icon: string; badge: string; pill: string }
+> = {
   14: {
-    label: "Anthropic",
-    icon: "🧠",
-    tone: "amber",
-    border: "border-amber-200",
-    bg: "bg-amber-50/40",
+    label: "Anthropic Claude",
+    icon: "✳️",
+    badge: "bg-amber-100 text-amber-700 ring-1 ring-amber-200",
+    pill: "bg-amber-50 text-amber-600 ring-1 ring-amber-100",
   },
   41: {
-    label: "VertexAI",
+    label: "Vertex AI",
     icon: "🔷",
-    tone: "indigo",
-    border: "border-indigo-200",
-    bg: "bg-indigo-50/40",
+    badge: "bg-sky-100 text-sky-700 ring-1 ring-sky-200",
+    pill: "bg-sky-50 text-sky-600 ring-1 ring-sky-100",
   },
 };
 
-function platformMeta(gt: GapItem) {
+function platformMeta(g: GapItem) {
   return (
-    PLATFORM_META[gt.channel_type] ?? {
-      label: gt.channel_type_name || `type ${gt.channel_type}`,
+    PLATFORM_META[g.channel_type] ?? {
+      label: g.channel_type_name || `type ${g.channel_type}`,
       icon: "📡",
-      tone: "slate" as const,
-      border: "border-slate-200",
-      bg: "bg-slate-50/40",
+      badge: "bg-slate-100 text-slate-600 ring-1 ring-slate-200",
+      pill: "bg-slate-50 text-slate-500 ring-1 ring-slate-100",
     }
   );
 }
 
-function fmtGap(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return String(Math.round(n));
+/** 缺口 RPM 火苗等级：越紧缺火越多。 */
+function fireLevel(rpm: number): string {
+  if (rpm >= 500) return "🔥🔥";
+  if (rpm >= 100) return "🔥";
+  return "";
+}
+
+/** TPM 以「万」展示（÷1万，千分位）。 */
+function fmtWan(n: number): string {
+  return `${Math.round(n / 10000).toLocaleString("en-US")}万`;
 }
 
 function ModelGapCard() {
@@ -1559,20 +1565,6 @@ function ModelGapCard() {
   }
 
   useEffect(() => { load(); }, [siteId]);
-
-  // 按渠道类型分组
-  const groups: { type: number; meta: ReturnType<typeof platformMeta>; items: GapItem[] }[] = [];
-  if (data) {
-    const map = new Map<number, GapItem[]>();
-    for (const g of data.items) {
-      const arr = map.get(g.channel_type) ?? [];
-      arr.push(g);
-      map.set(g.channel_type, arr);
-    }
-    for (const [type, items] of map.entries()) {
-      groups.push({ type, meta: platformMeta(items[0]), items });
-    }
-  }
 
   const checkedLabel =
     data && data.checked_at > 0
@@ -1614,47 +1606,52 @@ function ModelGapCard() {
         </div>
       )}
       {data && !loading && (
-        <div className="space-y-4">
-          {groups.map((grp) => (
-            <div key={grp.type} className={`rounded-xl border ${grp.meta.border} ${grp.meta.bg} p-4`}>
-              <div className="mb-3 flex items-center gap-2">
-                <span className="text-lg">{grp.meta.icon}</span>
-                <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${
-                  grp.meta.tone === "amber" ? "bg-amber-100 text-amber-700" :
-                  grp.meta.tone === "indigo" ? "bg-indigo-100 text-indigo-700" :
-                  grp.meta.tone === "cyan" ? "bg-cyan-100 text-cyan-700" :
-                  "bg-slate-100 text-slate-600"
-                }`}>
-                  {grp.meta.label}
-                </span>
-                <span className="text-xs text-slate-400">{grp.items.length} 模型</span>
-              </div>
-              <div className="grid gap-2 sm:grid-cols-2">
-                {grp.items.map((g, i) => (
-                  <div key={i} className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
-                    <div className="text-sm font-semibold text-slate-800">{g.model_name}</div>
-                    <div className="mt-1.5 flex items-center gap-4">
-                      <div>
-                        <div className="text-[10px] uppercase tracking-wide text-slate-400">Gap RPM</div>
-                        <div className="text-base font-bold tabular-nums text-slate-800">
-                          {fmtGap(g.gap_rpm)}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-[10px] uppercase tracking-wide text-slate-400">Gap TPM 估算</div>
-                        <div className="text-base font-bold tabular-nums text-slate-500">
-                          {fmtGap(g.gap_tpm_est)}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-          {groups.length === 0 && (
-            <p className="py-6 text-center text-sm text-slate-400">该站点暂无模型缺口数据</p>
-          )}
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-200 text-left text-xs text-slate-500">
+                <th className="pb-2 pr-3 font-medium">类型</th>
+                <th className="pb-2 pr-3 font-medium">模型名</th>
+                <th className="pb-2 pr-3 text-right font-medium">缺口RPM</th>
+                <th className="pb-2 text-right font-medium">缺口TPM(估)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.items.map((g, i) => {
+                const m = platformMeta(g);
+                return (
+                  <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/60">
+                    <td className="py-2 pr-3">
+                      <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold ${m.badge}`}>
+                        <span>{m.icon}</span>
+                        {m.label}
+                      </span>
+                    </td>
+                    <td className="py-2 pr-3">
+                      <span className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium ${m.pill}`}>
+                        <span>{m.icon}</span>
+                        {g.model_name}
+                      </span>
+                    </td>
+                    <td className="py-2 pr-3 text-right tabular-nums font-semibold text-slate-800">
+                      {fireLevel(g.gap_rpm) && <span className="mr-1">{fireLevel(g.gap_rpm)}</span>}
+                      {g.gap_rpm.toLocaleString("en-US")}
+                    </td>
+                    <td className="py-2 text-right tabular-nums text-slate-500">
+                      {fmtWan(g.gap_tpm_est)}
+                    </td>
+                  </tr>
+                );
+              })}
+              {data.items.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="py-6 text-center text-slate-400">
+                    该站点暂无模型缺口数据
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       )}
     </Card>
