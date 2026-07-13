@@ -6,6 +6,7 @@ import { apiFetch } from "@/lib/client";
 import { useToast } from "@/components/Toast";
 import { Button, Card, Spinner } from "@/components/ui";
 import { UserChannelCard } from "@/components/UserChannelCard";
+import { ModelGapCard } from "@/components/ModelGapCard";
 import {
   DirectResultView,
   type DirectUploadResult,
@@ -43,7 +44,7 @@ interface CreateBatchResult {
 
 export function UserPanel({ user }: { user: SafeUser }) {
   const toast = useToast();
-  const [tab, setTab] = useState<"my" | "channels">("my");
+  const [tab, setTab] = useState<"my" | "channels" | "gaps">("my");
   const [channel, setChannel] = useState<ChannelStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const mounted = useRef(true);
@@ -180,9 +181,19 @@ export function UserPanel({ user }: { user: SafeUser }) {
         >
           📊 渠道列表
         </button>
+        <button
+          onClick={() => setTab("gaps")}
+          className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium transition ${
+            tab === "gaps"
+              ? "bg-white text-slate-800 shadow-sm"
+              : "text-slate-500 hover:text-slate-700"
+          }`}
+        >
+          📉 模型缺口
+        </button>
       </div>
 
-      {tab === "my" ? (
+      {tab === "my" && (
         <div className="grid gap-4 lg:grid-cols-2">
           <ChannelCard
             user={user}
@@ -200,9 +211,9 @@ export function UserPanel({ user }: { user: SafeUser }) {
             onlyHighPriority={channel?.onlyHighPriority === true}
           />
         </div>
-      ) : (
-        <UserChannelCard user={user} />
       )}
+      {tab === "channels" && <UserChannelCard user={user} />}
+      {tab === "gaps" && <ModelGapCard endpoint="/api/my/model-gaps" />}
     </div>
   );
 }
