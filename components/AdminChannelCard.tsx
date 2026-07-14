@@ -8,6 +8,7 @@ import { Button, Card, Spinner, TextInput } from "@/components/ui";
 import {
   ChannelTable,
   downloadButtonLabel,
+  fmtUsd,
   newReportJobId,
   Pager,
   useElapsedSeconds,
@@ -102,6 +103,11 @@ export function AdminChannelCard() {
     () => allItems.slice((page - 1) * CLIENT_PAGE_SIZE, page * CLIENT_PAGE_SIZE),
     [allItems, page]
   );
+  // 金额总额：对全部搜索结果（非当前页）的原始额度求和，再统一换算美元
+  const totalUsd = useMemo(
+    () => allItems.reduce((sum, c) => sum + (c.used_quota || 0), 0),
+    [allItems]
+  );
 
   return (
     <Card
@@ -164,9 +170,15 @@ export function AdminChannelCard() {
 
       {allItems.length > 0 && !loading && (
         <>
-          <div className="mb-2 text-xs text-slate-500">
-            共 {total.toLocaleString()} 条，第 {page}/{totalPages} 页（每页{" "}
-            {CLIENT_PAGE_SIZE} 条）
+          <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
+            <span>
+              共 {total.toLocaleString()} 条，第 {page}/{totalPages} 页（每页{" "}
+              {CLIENT_PAGE_SIZE} 条）
+            </span>
+            <span className="text-slate-300">·</span>
+            <span className="font-semibold text-emerald-700">
+              金额合计 {fmtUsd(totalUsd)}
+            </span>
           </div>
           <ChannelTable items={pageItems} />
           <Pager page={page} totalPages={totalPages} onPage={setPage} />
