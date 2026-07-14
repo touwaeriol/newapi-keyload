@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { errorResponse, fail, ok, requireAdmin } from "@/lib/auth";
 import { getConfig, saveConfig } from "@/lib/store";
+import { adminEnabledModels } from "@/lib/supplier";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -75,10 +76,10 @@ export async function PUT(req: NextRequest) {
     if (!naciBaseUrl) return fail("naciBaseUrl 不能为空");
 
     const current = await getConfig();
-    // 未传或为空则保留原值；saveConfig 内部会再兜底默认
+    // 模型：仅接受 ALLOWED_MODELS 内的项（按标准顺序规整）；空/全非法则保留原值，不清库
     const models =
-      typeof body.models === "string" && body.models.trim()
-        ? body.models.trim()
+      typeof body.models === "string"
+        ? adminEnabledModels(body.models).join(",") || current.models
         : current.models;
     const naciUsername = (body.naciUsername ?? current.naciUsername ?? "").trim();
     const naciPassword =

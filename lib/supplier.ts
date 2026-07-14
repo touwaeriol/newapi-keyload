@@ -15,6 +15,50 @@ export const DEFAULT_MODELS =
 export const FIXED_MODELS = DEFAULT_MODELS;
 
 /**
+ * 允许配置的模型全集：管理员从中勾选「默认可用集」，用户再从启用集里多选自己的。
+ * 数组顺序即前端按钮展示顺序。纯常量，可安全被客户端组件 import。
+ */
+export const ALLOWED_MODELS = [
+  "claude-fable-5",
+  "claude-opus-4-8",
+  "claude-opus-4-7",
+  "claude-opus-4-6",
+] as const;
+
+/** 逗号分隔模型串 → 去空去重前的有序数组（仅去空白/空项）。 */
+export function parseModelList(csv: string | null | undefined): string[] {
+  return (csv ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * 管理员启用集 = config.models ∩ ALLOWED_MODELS（按 ALLOWED_MODELS 顺序规整）。
+ * 兜底：若配置里一个允许模型都没有（历史脏数据）→ 回退为原始 config.models 的解析结果，避免建渠道无模型。
+ */
+export function adminEnabledModels(cfgModels: string): string[] {
+  const set = new Set(parseModelList(cfgModels));
+  const eff = ALLOWED_MODELS.filter((m) => set.has(m));
+  return eff.length ? eff : parseModelList(cfgModels);
+}
+
+/**
+ * 用户建渠道生效的模型 = (user.models ?? 全部启用) ∩ 启用集；结果为空则回退全部启用。
+ * userModels 为 null/空 视为「跟随管理员默认」= 全选启用集。
+ */
+export function resolveUserModels(
+  userModels: string | null | undefined,
+  cfgModels: string
+): string[] {
+  const enabled = adminEnabledModels(cfgModels);
+  if (!enabled.length) return [];
+  const sel = userModels ? parseModelList(userModels) : enabled;
+  const eff = enabled.filter((m) => sel.includes(m));
+  return eff.length ? eff : enabled;
+}
+
+/**
  * 新建渠道优先级：6（账号允许 3/5/6，其中 6 为高优先级但配额仅 6 个）。
  * 渠道退化后由定时任务降到 DEMOTED_PRIORITY(5)，腾出优先级 6 配额。
  */

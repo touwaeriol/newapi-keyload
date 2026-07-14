@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { LogEntry, SafeUser } from "@/lib/types";
 import { apiFetch } from "@/lib/client";
+import { ALLOWED_MODELS } from "@/lib/supplier";
 import { useToast } from "@/components/Toast";
 import {
   Badge,
@@ -542,17 +543,48 @@ function ConfigCard() {
               </div>
             </CompactField>
             <CompactField
-              label="模型列表"
-              hint="新建渠道使用的模型，逗号分隔；默认 claude-opus-4-6,claude-opus-4-7,claude-opus-4-8"
+              label="模型列表（默认可用集）"
+              hint="勾选允许用户使用的模型；用户可在此集合内各自多选，至少启用 1 个。仅支持这 4 个模型。"
               className="sm:col-span-2 lg:col-span-3 xl:col-span-4"
             >
-              <textarea
-                value={models}
-                onChange={(e) => setModels(e.target.value)}
-                rows={2}
-                placeholder={DEFAULT_MODELS}
-                className="w-full resize-y rounded-lg border border-slate-300 px-3 py-1.5 font-mono text-xs text-slate-800 outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100"
-              />
+              <div className="flex flex-wrap gap-2">
+                {ALLOWED_MODELS.map((m) => {
+                  const on = models
+                    .split(",")
+                    .map((s) => s.trim())
+                    .includes(m);
+                  return (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => {
+                        const cur = new Set(
+                          models
+                            .split(",")
+                            .map((s) => s.trim())
+                            .filter(Boolean)
+                        );
+                        if (cur.has(m)) {
+                          if (cur.size <= 1) return; // 至少启用 1 个
+                          cur.delete(m);
+                        } else {
+                          cur.add(m);
+                        }
+                        // 按 ALLOWED_MODELS 顺序规整
+                        setModels(ALLOWED_MODELS.filter((x) => cur.has(x)).join(","));
+                      }}
+                      className={`rounded-lg px-3 py-1.5 font-mono text-xs font-medium ring-1 transition ${
+                        on
+                          ? "bg-brand-50 text-brand-700 ring-brand-400"
+                          : "bg-white text-slate-500 ring-slate-300 hover:bg-slate-50"
+                      }`}
+                    >
+                      {on ? "✓ " : ""}
+                      {m}
+                    </button>
+                  );
+                })}
+              </div>
             </CompactField>
           </ConfigSection>
 

@@ -29,6 +29,8 @@ export interface User {
   highPriorityLimit?: number | null;
   /** 单独关闭该用户的上传权限：true=其人工上传（上传一批/直接上传）一律拒绝（默认 false）。与全局总闸并存 */
   uploadDisabled?: boolean;
+  /** 该用户建渠道使用的模型列表（逗号分隔，须为管理员启用集子集；NULL/空=跟随管理员默认，即全选启用集） */
+  models?: string | null;
   createdAt: string;
   updatedAt: string;
 }

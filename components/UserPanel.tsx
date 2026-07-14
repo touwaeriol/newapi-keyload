@@ -194,27 +194,127 @@ export function UserPanel({ user }: { user: SafeUser }) {
       </div>
 
       {tab === "my" && (
-        <div className="grid gap-4 lg:grid-cols-2">
-          <ChannelCard
-            user={user}
-            channel={channel}
-            loading={loading}
-            onRefresh={() => fetchChannel(false)}
-            onSiteToggle={handleSiteToggle}
-            onDemote={handleDemote}
-            onSyncUsage={handleSyncUsage}
-          />
-          <UploadCard
-            onUploaded={() => fetchChannel(false)}
-            manualUploadEnabled={channel?.manualUploadEnabled !== false}
-            uploadDisabled={channel?.uploadDisabled === true}
-            onlyHighPriority={channel?.onlyHighPriority === true}
-          />
+        <div className="space-y-4">
+          <MyModelsCard />
+          <div className="grid gap-4 lg:grid-cols-2">
+            <ChannelCard
+              user={user}
+              channel={channel}
+              loading={loading}
+              onRefresh={() => fetchChannel(false)}
+              onSiteToggle={handleSiteToggle}
+              onDemote={handleDemote}
+              onSyncUsage={handleSyncUsage}
+            />
+            <UploadCard
+              onUploaded={() => fetchChannel(false)}
+              manualUploadEnabled={channel?.manualUploadEnabled !== false}
+              uploadDisabled={channel?.uploadDisabled === true}
+              onlyHighPriority={channel?.onlyHighPriority === true}
+            />
+          </div>
         </div>
       )}
       {tab === "channels" && <UserChannelCard user={user} />}
       {tab === "gaps" && <ModelGapCard endpoint="/api/my/model-gaps" />}
     </div>
+  );
+}
+
+/* ============ 我的模型卡 ============ */
+
+function MyModelsCard() {
+  const toast = useToast();
+  const [available, setAvailable] = useState<string[]>([]);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await apiFetch<{ available: string[]; selected: string[] }>(
+        "/api/my/models"
+      );
+      setAvailable(d.available ?? []);
+      setSelected(d.selected ?? []);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "读取模型列表失败");
+    } finally {
+      setLoading(false);
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // 点击即时保存：至少保留 1 个；按 available 顺序规整；失败回滚
+  async function toggle(m: string) {
+    if (saving) return;
+    const on = selected.includes(m);
+    if (on && selected.length <= 1) {
+      toast.info("至少保留 1 个模型");
+      return;
+    }
+    const nextSel = available.filter((x) =>
+      on ? selected.includes(x) && x !== m : selected.includes(x) || x === m
+    );
+    const prev = selected;
+    setSelected(nextSel);
+    setSaving(true);
+    try {
+      const d = await apiFetch<{ available: string[]; selected: string[] }>(
+        "/api/my/models",
+        { method: "POST", body: JSON.stringify({ models: nextSel }) }
+      );
+      setAvailable(d.available ?? []);
+      setSelected(d.selected ?? []);
+    } catch (err) {
+      setSelected(prev);
+      toast.error(err instanceof Error ? err.message : "保存模型列表失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card
+      title="🧩 我的模型"
+      subtitle="以下模型将用于你后续新建的渠道（在管理员开放范围内多选，至少 1 个，点击即保存）"
+    >
+      {loading ? (
+        <div className="flex items-center gap-2 py-4 text-sm text-slate-400">
+          <Spinner className="h-4 w-4" /> 加载中…
+        </div>
+      ) : available.length === 0 ? (
+        <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+          管理员尚未开放任何模型，请联系管理员。
+        </p>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {available.map((m) => {
+            const on = selected.includes(m);
+            return (
+              <button
+                key={m}
+                type="button"
+                disabled={saving}
+                onClick={() => toggle(m)}
+                className={`rounded-lg px-3 py-1.5 font-mono text-xs font-medium ring-1 transition disabled:opacity-60 ${
+                  on
+                    ? "bg-brand-50 text-brand-700 ring-brand-400"
+                    : "bg-white text-slate-500 ring-slate-300 hover:bg-slate-50"
+                }`}
+              >
+                {on ? "✓ " : ""}
+                {m}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </Card>
   );
 }
 

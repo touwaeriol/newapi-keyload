@@ -65,6 +65,14 @@ function fmtWan(n: number): string {
 }
 
 /**
+ * 「小请求难超刷」标记：缺口 RPM 够大但单请求平均 token 很小（如 RPM 5000 / TPM 仅 500万 ≈ 1000 token/请求）
+ * → 说明多为小请求、难靠超刷补上缺口，提示考虑从模型列表移除。阈值可调。
+ */
+function smallReqFlag(g: GapItem): boolean {
+  return g.gap_rpm >= 500 && g.gap_tpm_est / Math.max(g.gap_rpm, 1) < 2000;
+}
+
+/**
  * 模型缺口卡。endpoint 缺省走管理员接口；用户端传 "/api/my/model-gaps"。
  */
 export function ModelGapCard({
@@ -139,6 +147,13 @@ export function ModelGapCard({
         </div>
       }
     >
+      <div className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800 ring-1 ring-amber-100">
+        <span className="font-semibold">说明：</span>缺口 = 需求 − 供应。若某模型「缺口 RPM
+        很大但缺口 TPM 很小」（例如 RPM 5000 而 TPM 仅 500万），说明其请求多为小请求，很难靠超刷补上缺口，建议从模型列表中
+        <strong>去掉该模型</strong>；
+        <code className="rounded bg-amber-100 px-1">claude-opus-4-7</code>{" "}
+        尤其容易出现这种情况（下方 ⚠️ 即命中该特征的模型）。
+      </div>
       {error && (
         <p className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">
           {error}
@@ -183,6 +198,14 @@ export function ModelGapCard({
                         <span>{m.icon}</span>
                         {g.model_name}
                       </span>
+                      {smallReqFlag(g) && (
+                        <span
+                          className="ml-1 cursor-help"
+                          title="小请求为主、难以超刷（缺口 RPM 大但缺口 TPM 小），建议考虑从模型列表移除"
+                        >
+                          ⚠️
+                        </span>
+                      )}
                     </td>
                     <td className="py-2 pr-3 text-right tabular-nums font-semibold text-slate-800">
                       {fireLevel(g.gap_rpm) && (

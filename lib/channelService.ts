@@ -19,6 +19,7 @@ import {
   FIXED_PRIORITY,
   parseKeys,
   PUBLISH_SITES,
+  resolveUserModels,
 } from "./supplier";
 import {
   addKeysToPool,
@@ -234,6 +235,9 @@ export async function createChannelFromNextBatch(
 
   const cfg = await getConfig();
   const eff = effectiveUserLimit(user, cfg);
+  // 该用户建渠道生效的模型（个人所选 ∩ 管理员启用集；空则回退启用集/全局默认）。
+  const userModelsCsv =
+    resolveUserModels(user.models, cfg.models).join(",") || cfg.models;
 
   // —— 仅高优先级模式：入口区别对待 ——
   // - 定时任务(viaScheduler)：建高优先级(优先级6)渠道，受名额门控 + 公平轮转。
@@ -388,7 +392,7 @@ export async function createChannelFromNextBatch(
       created = await createChannel({
         name: alloc.channelName,
         keyText,
-        models: cfg.models,
+        models: userModelsCsv,
         priority: desiredPriority,
       });
       // 直接上传(forceNormalPriority)按批必然是 5，逐渠道记日志太吵，由 directUploadKeys 汇总记一条
@@ -429,7 +433,7 @@ export async function createChannelFromNextBatch(
         created = await createChannel({
           name: alloc.channelName,
           keyText,
-          models: cfg.models,
+          models: userModelsCsv,
           priority: DEMOTED_PRIORITY,
         });
         await addLog({
