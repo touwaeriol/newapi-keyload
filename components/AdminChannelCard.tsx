@@ -108,6 +108,26 @@ export function AdminChannelCard() {
     () => allItems.reduce((sum, c) => sum + (c.used_quota || 0), 0),
     [allItems]
   );
+  // Key 聚合统计：一个渠道可聚合多个 apikey，合计 = 各渠道 multiKeySize 之和；
+  // 仅统计已拉到 key 状态的渠道，未拉到的单列「状态未知」（与 CSV/Excel 报表合计口径一致）。
+  const keyStats = useMemo(() => {
+    let keys = 0;
+    let alive = 0;
+    let dead = 0;
+    let knownChannels = 0;
+    let unknownChannels = 0;
+    for (const c of allItems) {
+      if (c.hasStatus && c.multiKeySize > 0) {
+        keys += c.multiKeySize;
+        alive += c.aliveCount ?? 0;
+        dead += c.deadCount ?? 0;
+        knownChannels += 1;
+      } else {
+        unknownChannels += 1;
+      }
+    }
+    return { keys, alive, dead, knownChannels, unknownChannels };
+  }, [allItems]);
 
   return (
     <Card
@@ -178,6 +198,21 @@ export function AdminChannelCard() {
             <span className="text-slate-300">·</span>
             <span className="font-semibold text-emerald-700">
               金额合计 {fmtUsd(totalUsd)}
+            </span>
+            <span className="text-slate-300">·</span>
+            <span
+              className="font-semibold text-brand-700"
+              title="Key 列为聚合 key：一个渠道可聚合多个 apikey。合计 = 各渠道聚合 key 数之和；未拉到状态的渠道计为「状态未知」，不计入合计。"
+            >
+              Key 合计 {keyStats.keys.toLocaleString()} 个
+              <span className="font-normal text-slate-500">
+                （{keyStats.knownChannels.toLocaleString()} 渠道聚合
+                {keyStats.unknownChannels > 0
+                  ? `，另 ${keyStats.unknownChannels.toLocaleString()} 渠道状态未知`
+                  : ""}
+                ，存活 {keyStats.alive.toLocaleString()} / 失效{" "}
+                {keyStats.dead.toLocaleString()}）
+              </span>
             </span>
           </div>
           <ChannelTable items={pageItems} />
