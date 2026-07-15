@@ -42,3 +42,7 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 .idea/
+
+# ---- 临时脚本 / 导出的业务报表（勿入库）----
+/tmp_*
+*.xlsx
