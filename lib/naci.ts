@@ -724,7 +724,7 @@ export async function getChannelStatusFull(id: number): Promise<{
 }
 
 /** status-batch 单请求 id 分块大小（避免一个前缀几千渠道一次性请求把 naci 打爆/超时）。 */
-const STATUS_BATCH_CHUNK = 40;
+const STATUS_BATCH_CHUNK = 100;
 /** status-batch 分块之间的节流（ms），削峰降低 429。 */
 const STATUS_BATCH_CHUNK_DELAY_MS = 300;
 

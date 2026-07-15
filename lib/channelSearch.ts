@@ -99,8 +99,8 @@ export function ownChannelNameFilter(prefix: string): (name: string) => boolean 
   return (name) => re.test(name);
 }
 
-/** used-quota / status-batch 补数据的分块与节流（与后台用量任务同参）。 */
-const ENRICH_CHUNK = 40;
+/** used-quota / status-batch 补数据的分块与节流。100/批减少往返（单请求仍 <60s naci 超时）。 */
+const ENRICH_CHUNK = 100;
 const ENRICH_DELAY_MS = 300;
 
 const SITE_NAME_BY_ID = new Map(SITES.map((s) => [s.site_id, s.site_name]));
