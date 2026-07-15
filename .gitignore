@@ -17,17 +17,19 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# ---- 本地环境变量 ----
+# ---- 本地环境变量（任何 .env 变体都不入库，模板除外）----
 .env
-.env*.local
-.env.development
-.env.production
+.env.*
+!.env.example
 
 # ---- 本地持久化数据（运行时生成，不入库）----
-/data/*.json
+/data/**
 
 # ---- 原始接口抓包 / 样例（含真实密钥，勿入库）----
-/docs/*.txt
+# docs/ 下只允许 .md 文档入库，抓包不论后缀（txt/json/har/…）与层级一律拦下
+/docs/**
+!/docs/**/
+!/docs/**/*.md
 
 # ---- 临时脚本 / 导出的业务报表（勿入库）----
 /tmp_*
